@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SideraStack
+Comment=Calibrate, grade, align and stack astrophotography exposures
+Exec=siderastack %f
+Icon=org.siderastack.SideraStack
+Terminal=false
+Categories=Education;Science;Astronomy;
+Keywords=FITS;XISF;Astrophotography;Stacking;
+StartupNotify=true
