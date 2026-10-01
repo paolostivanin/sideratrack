@@ -18,7 +18,7 @@
 
 namespace ss {
 namespace {
-constexpr const char *algorithm = "siderastack-pipeline-4";
+constexpr const char *algorithm = "siderastack-pipeline-5";
 void emit(const Progress &p, const std::string &stage, size_t n, size_t total, const std::string &detail) {
     if (p)
         p(stage, n, total, detail);
@@ -36,13 +36,47 @@ bool geometry(const Frame &a, const Frame &b) {
     return a.descriptor.width == b.descriptor.width && a.descriptor.height == b.descriptor.height &&
            a.descriptor.channels == b.descriptor.channels && a.descriptor.cfa == b.descriptor.cfa;
 }
-bool compatible(const Frame &a, const Frame &b) {
-    if (!geometry(a, b))
-        return false;
+bool known(const QJsonObject &header, const char *key) {
+    return header.contains(key) && !header[key].isNull() && !str(header, key).empty();
+}
+bool equalMetadata(const QJsonObject &a, const QJsonObject &b, const char *key) {
+    if (!known(a, key) || !known(b, key))
+        return true;
+    if (std::set<std::string>{"XBINNING", "YBINNING", "GAIN", "OFFSET"}.contains(key)) {
+        auto x = number(a, key), y = number(b, key);
+        return std::isfinite(x) && std::isfinite(y) && x == y;
+    }
+    return QString::fromStdString(str(a, key))
+               .trimmed()
+               .compare(QString::fromStdString(str(b, key)).trimmed(), Qt::CaseInsensitive) == 0;
+}
+std::vector<std::string> mismatchReasons(const Frame &target, const Frame &candidate,
+                                         const std::string &kind) {
+    std::vector<std::string> reasons;
+    if (!geometry(target, candidate))
+        reasons.push_back("image geometry/CFA differs");
     for (const char *key : {"INSTRUME", "XBINNING", "YBINNING", "GAIN", "OFFSET", "READOUTM", "ROWORDER"})
-        if (str(a.descriptor.header, key) != str(b.descriptor.header, key))
-            return false;
-    return true;
+        if (!equalMetadata(target.descriptor.header, candidate.descriptor.header, key))
+            reasons.push_back(std::string(key) + " differs (light " + str(target.descriptor.header, key) +
+                              ", calibration " + str(candidate.descriptor.header, key) + ")");
+    if (kind == "flat" && !candidate.filter.empty() && candidate.filter != "Unknown" &&
+        !target.filter.empty() && target.filter != "Unknown" && candidate.filter != target.filter)
+        reasons.push_back("filter differs");
+    if (kind == "dark" || kind == "darkflat") {
+        auto exp = number(target.descriptor.header, "EXPTIME", number(target.descriptor.header, "EXPOSURE"));
+        auto other =
+            number(candidate.descriptor.header, "EXPTIME", number(candidate.descriptor.header, "EXPOSURE"));
+        if (std::isfinite(exp) && std::isfinite(other) &&
+            std::abs(exp - other) > 1e-6 * std::max(1.0, std::abs(exp)))
+            reasons.push_back("exposure differs");
+    }
+    if (kind != "flat") {
+        auto temp = number(target.descriptor.header, "CCD-TEMP"),
+             other = number(candidate.descriptor.header, "CCD-TEMP");
+        if (std::isfinite(temp) && std::isfinite(other) && std::abs(temp - other) > 1)
+            reasons.push_back("temperature differs by more than 1°C");
+    }
+    return reasons;
 }
 std::vector<Frame> choose(const Frame &light, const std::vector<Frame> &all, const std::string &kind) {
     const auto overrideKey = "SS_" + QString::fromStdString(kind).toUpper().toStdString();
@@ -71,38 +105,79 @@ std::vector<Frame> choose(const Frame &light, const std::vector<Frame> &all, con
             }
             continue;
         }
-        if (!compatible(light, f))
+        if (!mismatchReasons(light, f, kind).empty())
             continue;
-        if (kind == "flat" && f.filter != light.filter)
-            continue;
-        if (kind == "dark" || kind == "darkflat") {
-            auto exp =
-                number(light.descriptor.header, "EXPTIME", number(light.descriptor.header, "EXPOSURE"));
-            auto other = number(f.descriptor.header, "EXPTIME", number(f.descriptor.header, "EXPOSURE"));
-            if (!std::isfinite(exp) || !std::isfinite(other) ||
-                std::abs(exp - other) > 1e-6 * std::max(1.0, exp))
-                continue;
-        }
-        if (kind == "bias" || kind == "dark" || kind == "darkflat") {
-            auto t = number(light.descriptor.header, "CCD-TEMP"), u = number(f.descriptor.header, "CCD-TEMP");
-            if (std::isfinite(t) != std::isfinite(u) || (std::isfinite(t) && std::abs(t - u) > 1))
-                continue;
-        }
         found.push_back(f);
     }
     if (!ids.empty() && found.size() != ids.size())
         throw Error("Calibration override refers to absent, excluded, or wrong-type frames");
-    if (ids.empty()) {
-        bool same = std::any_of(found.begin(), found.end(),
-                                [&](const Frame &f) { return f.session == light.session; });
-        if (same)
-            std::erase_if(found, [&](const Frame &f) { return f.session != light.session; });
-        if (kind == "flat" && !same) {
+    if (ids.empty() && !found.empty()) {
+        auto rank = [&](const Frame &f) {
+            int completeness = 0;
+            for (const char *key :
+                 {"INSTRUME", "XBINNING", "YBINNING", "GAIN", "OFFSET", "READOUTM", "ROWORDER"})
+                completeness += known(f.descriptor.header, key);
+            if (kind == "dark" || kind == "darkflat")
+                completeness += std::isfinite(
+                    number(f.descriptor.header, "EXPTIME", number(f.descriptor.header, "EXPOSURE")));
+            if (kind != "flat")
+                completeness += std::isfinite(number(f.descriptor.header, "CCD-TEMP"));
+            if (kind == "flat")
+                completeness += !f.filter.empty() && f.filter != "Unknown";
+            return std::tuple{completeness, f.session == light.session, f.master};
+        };
+        auto best = rank(*std::max_element(
+            found.begin(), found.end(), [&](const Frame &a, const Frame &b) { return rank(a) < rank(b); }));
+        std::erase_if(found, [&](const Frame &f) { return rank(f) != best; });
+        if (kind == "flat") {
             std::set<std::string> nights;
             for (const auto &f : found)
                 nights.insert(f.session);
             if (nights.size() > 1)
                 throw Error("Multiple flat sessions match; assign a flat group explicitly");
+        }
+        if (kind == "flat") {
+            std::set<std::string> filters;
+            for (const auto &f : found)
+                if (!f.filter.empty() && f.filter != "Unknown")
+                    filters.insert(f.filter);
+            if (filters.size() > 1)
+                throw Error("Multiple flat filters match; assign a filter or flat group explicitly");
+        }
+        if (kind == "dark" || kind == "darkflat") {
+            double first = missing;
+            for (const auto &f : found) {
+                auto exp = number(f.descriptor.header, "EXPTIME", number(f.descriptor.header, "EXPOSURE"));
+                if (std::isfinite(exp)) {
+                    if (std::isfinite(first) && std::abs(exp - first) > 1e-6 * std::max(1.0, std::abs(first)))
+                        throw Error("Multiple calibration exposures match; assign exposure metadata or a "
+                                    "group explicitly");
+                    first = exp;
+                }
+            }
+        }
+        if (kind != "flat") {
+            double lo = INFINITY, hi = -INFINITY;
+            for (const auto &f : found) {
+                auto temp = number(f.descriptor.header, "CCD-TEMP");
+                if (std::isfinite(temp)) {
+                    lo = std::min(lo, temp);
+                    hi = std::max(hi, temp);
+                }
+            }
+            if (hi - lo > 1)
+                throw Error("Multiple calibration temperature groups match; choose a group explicitly");
+        }
+        // Unknown target metadata must not combine conflicting acquisition groups.
+        for (const char *key :
+             {"INSTRUME", "XBINNING", "YBINNING", "GAIN", "OFFSET", "READOUTM", "ROWORDER"}) {
+            const Frame *first = nullptr;
+            for (const auto &f : found)
+                if (known(f.descriptor.header, key)) {
+                    if (first && !equalMetadata(f.descriptor.header, first->descriptor.header, key))
+                        throw Error("Conflicting " + kind + " groups match; choose an explicit assignment");
+                    first = &f;
+                }
         }
     }
     std::vector<Frame> masters;
@@ -172,7 +247,28 @@ struct Engine {
     Engine(Settings s, std::vector<Frame> &f, Progress p)
         : settings(std::move(s)), frames(f), progress(std::move(p)),
           calibrationKey(calibrationSignature(f, settings.allowUncalibrated)) {
+        const auto previewBudget = previewDiskBudget(settings);
+        settings.scratch -= previewBudget;
         fs::create_directories(settings.cacheDirectory);
+        const auto previews = settings.cacheDirectory / "previews";
+        if (fs::is_directory(previews)) {
+            std::vector<fs::directory_entry> entries;
+            uint64_t bytes = 0;
+            for (const auto &item : fs::directory_iterator(previews))
+                if (item.is_regular_file() && item.path().filename().string().rfind("preview-", 0) == 0 &&
+                    item.path().extension() == ".png") {
+                    bytes += item.file_size();
+                    entries.push_back(item);
+                }
+            std::sort(entries.begin(), entries.end(),
+                      [](const auto &a, const auto &b) { return a.last_write_time() < b.last_write_time(); });
+            for (const auto &item : entries) {
+                if (bytes <= previewBudget)
+                    break;
+                bytes -= item.file_size();
+                fs::remove(item.path());
+            }
+        }
         std::vector<fs::directory_entry> files;
         for (const auto &item : fs::directory_iterator(settings.cacheDirectory))
             if (item.is_regular_file() && item.path().filename().string().rfind("cache-", 0) == 0 &&
@@ -360,17 +456,34 @@ struct Engine {
         return out;
     }
     Image processed(const Frame &light) {
+        const auto key = dependencyKey(light, calibrationKey);
+        if (light.calibrationKey != key || light.calibratedPath.empty() || !fs::exists(light.calibratedPath))
+            throw Error("Run Calibrate first: prepared image is missing or stale for " +
+                        light.path.filename().string());
+        try {
+            auto image = readImage(light.calibratedPath, false, settings.memory / 2);
+            if (str(image.header, "SSPREP") != key || image.width != light.descriptor.width ||
+                image.height != light.descriptor.height ||
+                image.channels != (light.descriptor.cfa.empty() ? light.descriptor.channels : 3))
+                throw Error("Prepared image does not match its inputs");
+            return image;
+        } catch (const std::exception &e) {
+            checkpoint();
+            throw Error("Run Calibrate again for " + light.path.filename().string() + ": " + e.what());
+        }
+    }
+    Image prepare(const Frame &light) {
         auto key = hash("processed" + dependencyKey(light, calibrationKey));
         Image im;
         if (cacheGet(key, im))
             return im;
-        im = read(light);
         auto darkGroup = choose(light, frames, "dark");
         auto flatGroup = choose(light, frames, "flat");
         auto biasGroup = choose(light, frames, "bias");
         if (darkGroup.empty() && biasGroup.empty() && flatGroup.empty() && !settings.allowUncalibrated)
             throw Error("No matching calibration for " + light.path.filename().string() +
                         "; review assignments or explicitly allow uncalibrated processing");
+        im = read(light);
         if (!darkGroup.empty()) {
             auto dark = master(darkGroup, "dark");
             subtract(im, *dark);
@@ -431,7 +544,7 @@ void identify(Project &project, std::vector<Frame> &frames, const Progress &prog
         if (f.selection >= 0) {
             auto digest = fingerprint(f.path);
             if (!invalidate && !f.identity.empty() && digest != f.identity)
-                throw Error("Input changed; run Analyze again: " + f.path.string());
+                throw Error("Input changed; run Calibrate and Analyze again: " + f.path.string());
             f.identity = digest;
             project.save(f);
         }
@@ -524,9 +637,29 @@ void publishBundle(const QJsonObject &pending) {
     }
 }
 } // namespace
+uint64_t previewDiskBudget(const Settings &settings) {
+    return std::min<uint64_t>(2 * GiB, settings.scratch / 10);
+}
+std::string calibrationRevision(const std::vector<Frame> &frames, const Settings &settings) {
+    return calibrationSignature(frames, settings.allowUncalibrated);
+}
+bool preparationReady(const std::vector<Frame> &frames, const Settings &settings) {
+    const auto signature = calibrationSignature(frames, settings.allowUncalibrated);
+    bool lights = false;
+    for (const auto &f : frames)
+        if (f.kind == "unknown" && f.selection >= 0)
+            return false;
+        else if (f.kind == "light" && !f.master && f.selection >= 0) {
+            lights = true;
+            if (f.identity.empty() || f.calibrationKey != dependencyKey(f, signature) ||
+                f.calibratedPath.empty() || !fs::exists(f.calibratedPath))
+                return false;
+        }
+    return lights;
+}
 QJsonArray calibrationPlan(const std::vector<Frame> &frames) {
     QJsonArray result;
-    std::set<std::string> seen;
+    std::map<std::string, int> groups;
     for (const auto &f : frames)
         if (f.kind == "light" && f.selection >= 0 && !f.master) {
             QJsonObject grouping{{"session", QString::fromStdString(f.session)},
@@ -540,42 +673,197 @@ QJsonArray calibrationPlan(const std::vector<Frame> &frames) {
                   "EXPOSURE", "CCD-TEMP", "SS_BIAS", "SS_DARK", "SS_FLAT"})
                 grouping[key] = f.descriptor.header[key];
             auto signature = json(grouping).toStdString();
-            if (!seen.insert(signature).second)
+            if (auto it = groups.find(signature); it != groups.end()) {
+                auto row = result[it->second].toObject();
+                row["count"] = row["count"].toInt() + 1;
+                result[it->second] = row;
                 continue;
+            }
+            groups[signature] = int(result.size());
             QJsonObject row{{"frame", qint64(f.id)},
+                            {"count", 1},
                             {"session", QString::fromStdString(f.session)},
                             {"filter", QString::fromStdString(f.filter)}};
+            QJsonArray details, warnings;
             try {
                 for (const char *kind : {"bias", "dark", "flat"}) {
                     QJsonArray ids;
-                    for (const auto &c : choose(f, frames, kind))
+                    for (const auto &c : choose(f, frames, kind)) {
                         ids.append(qint64(c.id));
+                        QJsonArray missingFields;
+                        for (const char *key :
+                             {"INSTRUME", "XBINNING", "YBINNING", "GAIN", "OFFSET", "READOUTM"})
+                            if (!known(c.descriptor.header, key))
+                                missingFields.append(key);
+                        if (std::string(kind) != "flat" && !known(c.descriptor.header, "CCD-TEMP"))
+                            missingFields.append("CCD-TEMP");
+                        if (std::string(kind) == "dark" && !known(c.descriptor.header, "EXPTIME") &&
+                            !known(c.descriptor.header, "EXPOSURE"))
+                            missingFields.append("EXPTIME");
+                        if (std::string(kind) == "flat" && !c.master) {
+                            auto darkflat = choose(c, frames, "darkflat");
+                            auto bias = choose(c, frames, "bias");
+                            if (darkflat.empty() && bias.empty())
+                                warnings.append(QString::fromStdString(c.path.filename().string()) +
+                                                ": no matching dark-flat or bias for this flat");
+                            if (!darkflat.empty() && darkflat.front().master &&
+                                darkflat.front().biasSubtracted && bias.empty())
+                                warnings.append(QString::fromStdString(c.path.filename().string()) +
+                                                ": bias-subtracted dark-flat requires a bias");
+                        }
+                        details.append(
+                            QJsonObject{{"id", qint64(c.id)},
+                                        {"kind", kind},
+                                        {"file", QString::fromStdString(c.path.filename().string())},
+                                        {"inferred", c.metadataSources},
+                                        {"missing", missingFields}});
+                    }
                     row[kind] = ids;
+                    if (ids.empty() && str(f.descriptor.header,
+                                           ("SS_" + QString(kind).toUpper().toStdString()).c_str()) != "none")
+                        for (const auto &candidate : frames)
+                            if (candidate.kind == kind && candidate.selection >= 0) {
+                                auto reasons = mismatchReasons(f, candidate, kind);
+                                QStringList messages;
+                                for (const auto &reason : reasons)
+                                    messages << QString::fromStdString(reason);
+                                if (!messages.empty())
+                                    warnings.append(
+                                        QString::fromStdString(candidate.path.filename().string()) + ": " +
+                                        messages.join("; "));
+                            }
                 }
+                if (row["flat"].toArray().isEmpty())
+                    warnings.append("No flat correction assigned");
+                if (row["bias"].toArray().isEmpty() && row["dark"].toArray().isEmpty() &&
+                    row["flat"].toArray().isEmpty())
+                    warnings.append("No calibration assigned");
             } catch (const std::exception &e) {
                 row["error"] = e.what();
             }
+            row["details"] = details;
+            row["warnings"] = warnings;
             result.append(row);
         }
     return result;
 }
-Image previewFrame(Project &project, int64_t id, bool &calibrated) {
+void calibrate(Project &project, const fs::path &directory, const Progress &progress) {
+    auto lock = lockProject(project);
+    auto settings = project.settings();
     auto frames = project.frames();
-    auto found = std::find_if(frames.begin(), frames.end(), [&](const Frame &f) { return f.id == id; });
-    if (found == frames.end())
+    for (auto &f : frames) {
+        inferMetadata(f);
+        project.save(f);
+    }
+    preflight(frames, settings);
+    tbb::global_control workers(tbb::global_control::max_allowed_parallelism, size_t(settings.threads));
+    identify(project, frames, progress, true);
+    auto output = directory.empty() ? fs::path(str(project.record("calibration"), "directory",
+                                                   project.path().string() + ".calibrated"))
+                                    : directory;
+    output = fs::absolute(output);
+    fs::create_directories(output);
+    project.record("calibration", {{"directory", QString::fromStdString(output.string())}});
+    Engine engine(settings, frames, progress);
+    size_t total = 0, done = 0, failed = 0;
+    uint64_t needed = 0;
+    for (const auto &f : frames)
+        if (f.kind == "light" && !f.master && f.selection >= 0) {
+            ++total;
+            const auto key = dependencyKey(f, engine.calibrationKey);
+            if (f.calibrationKey != key || f.calibratedPath.parent_path() != output ||
+                !fs::exists(f.calibratedPath))
+                needed += uint64_t(f.descriptor.plane()) *
+                              (f.descriptor.cfa.empty() ? f.descriptor.channels : 3) * sizeof(float) +
+                          MiB;
+        }
+    if (fs::space(output).available < needed + 64 * MiB)
+        throw Error(
+            "Insufficient disk space for prepared light images; choose another calibration directory");
+    for (auto &f : frames)
+        if (f.kind == "light" && !f.master && f.selection >= 0) {
+            checkpoint();
+            const auto key = dependencyKey(f, engine.calibrationKey);
+            const auto previousPath = f.calibratedPath;
+            const auto previousKey = f.calibrationKey;
+            try {
+                bool reuse = f.calibrationKey == key && f.calibratedPath.parent_path() == output;
+                if (reuse) {
+                    try {
+                        engine.processed(f);
+                    } catch (...) {
+                        checkpoint();
+                        reuse = false;
+                    }
+                }
+                if (!reuse) {
+                    auto path = output / ("light-" + std::to_string(f.id) + "-" + key + ".fits");
+                    bool recovered = false;
+                    if (fs::exists(path) && path != f.calibratedPath) {
+                        // A crash may publish an image before its SQLite record is committed.
+                        auto candidate = f;
+                        candidate.calibrationKey = key;
+                        candidate.calibratedPath = path;
+                        engine.processed(candidate); // checksum, dependency marker and geometry
+                        recovered = true;
+                    }
+                    if (!recovered) {
+                        auto image = engine.prepare(f);
+                        image.header["SSPREP"] = QString::fromStdString(key);
+                        image.header["SSCAL"] = !choose(f, frames, "dark").empty() ||
+                                                !choose(f, frames, "bias").empty() ||
+                                                !choose(f, frames, "flat").empty();
+                        if (fs::space(output).available < image.samples() * sizeof(float) + 64 * MiB)
+                            throw Error("Insufficient disk space to publish prepared image");
+                        writeImage(path, image, Format::Fits, path == f.calibratedPath);
+                    }
+                    f.calibratedPath = path;
+                    f.calibrationKey = key;
+                    f.analysisKey.clear();
+                    f.metrics = {};
+                    f.stars.clear();
+                    f.transform = {};
+                }
+                if (!reuse)
+                    f.error.clear();
+            } catch (const std::exception &e) {
+                checkpoint();
+                f.error = e.what();
+                f.calibrationKey.clear();
+                f.analysisKey.clear();
+                f.metrics = {};
+                f.stars.clear();
+                f.transform = {};
+                ++failed;
+            }
+            project.save(f);
+            if (!f.calibrationKey.empty() && previousPath != f.calibratedPath && !previousKey.empty() &&
+                previousPath.filename() == "light-" + std::to_string(f.id) + "-" + previousKey + ".fits" &&
+                std::none_of(frames.begin(), frames.end(),
+                             [&](const Frame &source) { return source.path == previousPath; })) {
+                std::error_code ignored;
+                fs::remove(previousPath, ignored);
+            }
+            emit(progress, "calibrate", ++done, total, f.path.filename().string());
+        }
+    if (failed)
+        throw Error(std::to_string(failed) +
+                    " lights could not be calibrated; inspect frame errors and assignments");
+}
+Image previewFrame(Project &project, int64_t id, bool &calibrated) {
+    auto found = project.frame(id);
+    if (!found)
         throw Error("Preview frame no longer exists");
+    auto frames = project.calibrationFrames();
     auto settings = project.settings();
     auto key = dependencyKey(*found, calibrationSignature(frames, settings.allowUncalibrated));
-    auto cached = settings.cacheDirectory / ("cache-" + hash("processed" + key) + ".fits");
     calibrated = false;
-    if (found->analysisKey == key && fs::exists(cached)) {
-        try {
-            auto im = readImage(cached, false, settings.memory / 2);
-            calibrated = true;
-            return im;
-        } catch (...) {
-            checkpoint();
-        }
+    if (found->calibrationKey == key && fs::exists(found->calibratedPath)) {
+        auto im = readImage(found->calibratedPath, false, settings.memory / 2);
+        if (str(im.header, "SSPREP") != key)
+            throw Error("Prepared preview is stale; run Calibrate again");
+        calibrated = im.header["SSCAL"].toBool();
+        return im;
     }
     auto im = readImage(found->path, false, settings.memory / 2);
     im.header = found->descriptor.header;
@@ -597,7 +885,9 @@ void analyze(Project &project, const Progress &progress) {
     auto frames = project.frames();
     preflight(frames, settings);
     tbb::global_control workers(tbb::global_control::max_allowed_parallelism, size_t(settings.threads));
-    identify(project, frames, progress, true);
+    if (!preparationReady(frames, settings))
+        throw Error("Run Calibrate first: included lights need current prepared images");
+    identify(project, frames, progress, false);
     Engine engine(settings, frames, progress);
     size_t done = 0, total = 0;
     for (auto &f : frames)
@@ -619,21 +909,22 @@ void analyze(Project &project, const Progress &progress) {
         if (f.kind == "light" && !f.master && f.selection >= 0) {
             checkpoint();
             auto key = dependencyKey(f, engine.calibrationKey);
-            if (f.analysisKey == key && !f.stars.empty()) {
-                emit(progress, "analyze", ++measured, total, f.path.filename().string());
-                continue;
-            }
             f.error.clear();
             f.transform = {};
             Image image;
             try {
-                image =
-                    engine.processed(f); // One bounded reader/calibrator; overlap independent measurements.
+                image = engine.processed(f); // One bounded reader; overlap independent measurements.
+                if (f.analysisKey == key && !f.stars.empty()) {
+                    emit(progress, "analyze", ++measured, total, f.path.filename().string());
+                    continue;
+                }
             } catch (const std::exception &e) {
                 checkpoint();
                 f.error = e.what();
                 f.stars.clear();
+                f.metrics = {};
                 f.analysisKey.clear();
+                f.calibrationKey.clear();
                 std::lock_guard guard(saveMutex);
                 project.save(f);
                 emit(progress, "analyze", ++measured, total, f.path.filename().string());

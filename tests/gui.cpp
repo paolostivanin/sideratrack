@@ -17,6 +17,54 @@ int main(int argc, char **argv) {
     QTemporaryDir temp;
     qputenv("XDG_CACHE_HOME", (temp.path() + "/cache").toUtf8());
     try {
+        if (auto existing = qEnvironmentVariable("SIDERASTACK_REVIEW_PROJECT"); !existing.isEmpty()) {
+            Window actual;
+            actual.open(existing);
+            actual.show();
+            QTest::qWait(100);
+            check(actual.analyzeAction->isEnabled(), "real project preparation readiness");
+            int selected = 0;
+            for (int row = 0; row < actual.model.rowCount() && selected < 2; ++row)
+                if (actual.model.frames[size_t(row)].kind == "light") {
+                    auto index = actual.proxy.mapFromSource(actual.model.index(row, 0));
+                    actual.table.selectionModel()->select(index, QItemSelectionModel::Select |
+                                                                     QItemSelectionModel::Rows);
+                    actual.table.selectionModel()->setCurrentIndex(index, QItemSelectionModel::NoUpdate);
+                    ++selected;
+                }
+            actual.blinkInterval.setValue(0.2);
+            actual.blinkButton->setChecked(true);
+            QElapsedTimer wait;
+            wait.start();
+            while ((actual.previewCache.size() < 2 || actual.previewThread) && wait.elapsed() < 30000)
+                QTest::qWait(20);
+            check(actual.previewCache.size() >= 2 && actual.blink.isActive(), "real dataset blink warmup");
+            check(actual.view.pixels->pixmap().width() == 2048, "real blink uses smaller playback previews");
+            auto renders = actual.previewRenders;
+            QTest::qWait(1000);
+            check(actual.previewRenders == renders, "real dataset warm playback avoids recomputation");
+            auto screenshot = qEnvironmentVariable("SIDERASTACK_REVIEW_SCREENSHOT");
+            if (!screenshot.isEmpty())
+                check(actual.grab().save(screenshot), "real review screenshot");
+            actual.blinkButton->setChecked(false);
+            wait.restart();
+            while (actual.previewThread && wait.elapsed() < 30000)
+                QTest::qWait(20);
+            check(actual.view.pixels->pixmap().width() == 6252, "real stop restores full resolution");
+            QTimer::singleShot(200, [&] {
+                for (auto *widget : QApplication::topLevelWidgets())
+                    if (auto *dialog = qobject_cast<QDialog *>(widget);
+                        dialog && dialog->windowTitle() == "Calibration assignments") {
+                        if (!screenshot.isEmpty())
+                            check(dialog->grab().save(screenshot + ".calibration.png"),
+                                  "calibration summary screenshot");
+                        dialog->reject();
+                    }
+            });
+            actual.calibration();
+            std::cout << "Real dataset GUI playback and assignment review passed\n";
+            return 0;
+        }
         const auto root = ss::fs::path(temp.path().toStdString());
         const auto projectPath = root / "scale.sidera";
         {
@@ -108,6 +156,126 @@ int main(int argc, char **argv) {
         check(window.project->record("calibration-results")["masters"].toArray().size() == 2,
               "GUI exports bias and flat masters");
         window.close();
+        // Exercise real progressive analysis and cached playback in a separate valid project.
+        const auto reviewPath = root / "review.sidera";
+        ss::Project reviewProject(reviewPath, true);
+        auto reviewSettings = reviewProject.settings();
+        reviewSettings.threads = 1;
+        reviewSettings.memory = 256 * ss::MiB;
+        reviewSettings.scratch = 128 * ss::MiB;
+        reviewProject.settings(reviewSettings);
+        ss::Image exposure;
+        exposure.width = exposure.height = 512;
+        exposure.header = {{"IMAGETYP", "Light"}, {"FILTER", "L"}, {"EXPTIME", 60}};
+        exposure.pixels.assign(exposure.samples(), 100);
+        for (int sy = 40; sy < 480; sy += 55)
+            for (int sx = 40; sx < 480; sx += 55)
+                for (int y = sy - 8; y <= sy + 8; ++y)
+                    for (int x = sx - 8; x <= sx + 8; ++x)
+                        exposure.pixels[size_t(y) * 512 + x] +=
+                            float(1500 * std::exp(-((x - sx) * (x - sx) + (y - sy) * (y - sy)) / 8.0));
+        auto reviewInputs = root / "review-inputs";
+        ss::fs::create_directories(reviewInputs);
+        for (int i = 0; i < 32; ++i)
+            ss::writeImage(reviewInputs / ("light-" + std::to_string(i) + ".fits"), exposure,
+                           ss::Format::Fits);
+        exposure.header["IMAGETYP"] = "Bias";
+        exposure.pixels.assign(exposure.samples(), 10);
+        ss::writeImage(reviewInputs / "bias.fits", exposure, ss::Format::Fits);
+        Window review;
+        review.open(QString::fromStdString(reviewPath.string()));
+        review.show();
+        auto finish = [&] {
+            elapsed.restart();
+            while ((review.worker.state() != QProcess::NotRunning || review.model.busy) &&
+                   elapsed.elapsed() < 30000)
+                QTest::qWait(20);
+            check(!review.model.busy && review.worker.exitCode() == 0, "review worker completes");
+        };
+        check(!review.analyzeAction->isEnabled(), "analysis requires calibrated lights");
+        review.start("import", {QString::fromStdString(reviewInputs.string())});
+        finish();
+        review.start("calibrate");
+        finish();
+        check(review.analyzeAction->isEnabled(), "calibration enables analysis");
+        review.proxy.sort(8, Qt::DescendingOrder);
+        std::vector<int64_t> selected;
+        for (int row = 0; row < review.model.rowCount() && selected.size() < 2; ++row)
+            if (review.model.frames[size_t(row)].kind == "light") {
+                selected.push_back(review.model.frames[size_t(row)].id);
+                auto index = review.proxy.mapFromSource(review.model.index(row, 0));
+                review.table.selectionModel()->select(index, QItemSelectionModel::Select |
+                                                                 QItemSelectionModel::Rows);
+                review.table.selectionModel()->setCurrentIndex(index, QItemSelectionModel::NoUpdate);
+            }
+        bool progressive = false;
+        QTimer monitor;
+        QObject::connect(&monitor, &QTimer::timeout, [&] {
+            if (review.worker.state() == QProcess::Running)
+                for (const auto &frame : review.model.frames)
+                    progressive |= frame.kind == "light" && frame.metrics.stars > 0;
+        });
+        monitor.start(10);
+        review.start("analyze");
+        finish();
+        monitor.stop();
+        check(progressive, "analysis results appear before worker exits");
+        auto selection = review.selectedRows();
+        check(selection.size() == 2, "live sorted updates preserve selection");
+        for (auto row : selection)
+            check(std::find(selected.begin(), selected.end(), review.model.frames[row].id) != selected.end(),
+                  "selected frame identities survive sorting");
+        review.blinkInterval.setValue(0.1);
+        review.blinkButton->setChecked(true);
+        elapsed.restart();
+        while ((review.previewCache.size() < 2 || review.previewThread) && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(review.previewCache.size() >= 2 && review.blink.isActive(), "blink warms selected previews");
+        auto renders = review.previewRenders;
+        QTest::qWait(600);
+        check(review.previewRenders == renders, "warm blink switches do not decode or stretch again");
+        review.blinkInterval.setValue(5);
+        check(review.blink.interval() == 5000, "blink speed updates during playback");
+        review.blinkButton->setChecked(false);
+        elapsed.restart();
+        while (review.previewThread && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(!review.blink.isActive() && review.view.pixels->pixmap().size() == QSize(512, 512),
+              "stop restores full-resolution inspection");
+        auto downsampled = exposure;
+        downsampled.width = 3000;
+        downsampled.height = 1000;
+        downsampled.pixels.assign(downsampled.samples(), 100);
+        double lo = NAN, hi = NAN;
+        auto smaller = preview(downsampled, lo, hi, false, 2048);
+        check(smaller.width() == 2048 && smaller.height() <= 684, "blink preview resolution cap");
+        ss::Frame geometry;
+        geometry.descriptor = downsampled;
+        geometry.stars.push_back({1500, 500, 1000, 3, 2, .1});
+        auto markers = review.displayStars(geometry, smaller);
+        check(std::abs(markers[0].x - smaller.width() / 2.0) < .01 &&
+                  std::abs(markers[0].y - smaller.height() / 2.0) < .01,
+              "scaled blink overlays align");
+        const auto cachedCount = review.previewCache.size();
+        review.blinkButton->setChecked(true);
+        QTest::qWait(50);
+        check(review.previewCache.size() == cachedCount && !review.previewThread,
+              "restart keeps warm blink cache");
+        review.blinkButton->setChecked(false);
+        elapsed.restart();
+        while (review.previewThread && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        review.previewCache.clear();
+        renders = review.previewRenders;
+        review.blinkButton->setChecked(true);
+        elapsed.restart();
+        while ((review.previewCache.size() < 2 || review.previewThread) && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(review.previewRenders == renders && review.previewCache.size() >= 2,
+              "evicted RAM previews are restored from disk without recomputing");
+        review.blinkButton->setChecked(false);
+        review.close();
+
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

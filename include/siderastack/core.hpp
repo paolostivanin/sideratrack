@@ -11,6 +11,8 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -80,6 +82,9 @@ struct Frame {
     int64_t id = 0;
     fs::path path;
     std::string identity, kind = "unknown", filter, session, error, analysisKey;
+    std::string calibrationKey;
+    fs::path calibratedPath;
+    QJsonObject metadataSources;
     bool master = false, biasSubtracted = false;
     int selection = 0; // -1 excluded, 0 automatic, +1 manually included.
     Image descriptor;
@@ -90,6 +95,7 @@ struct Frame {
     static Frame fromJson(const QJsonObject &);
 };
 void editFrame(Frame &, const QJsonObject &);
+void inferMetadata(Frame &);
 struct Settings {
     uint64_t memory = 0, scratch = 0;
     fs::path cacheDirectory;
@@ -110,6 +116,9 @@ class Project {
     Project(const Project &) = delete;
     Project &operator=(const Project &) = delete;
     std::vector<Frame> frames() const;
+    std::vector<Frame> calibrationFrames() const;
+    std::optional<Frame> frame(int64_t id) const;
+    std::function<void(int64_t)> frameChanged;
     void save(Frame &);
     Settings settings() const;
     void settings(const Settings &);
@@ -123,6 +132,8 @@ class Project {
   private:
     sqlite3 *db_ = nullptr;
     fs::path path_;
+    bool inTransaction_ = false;
+    std::set<int64_t> changedFrames_;
     void exec(const std::string &) const;
 };
 using Progress = std::function<void(const std::string &, size_t, size_t, const std::string &)>;
@@ -133,6 +144,10 @@ Image debayer(const Image &);
 float interpolate(const Image &, int channel, double x, double y);
 std::vector<Frame> selectedLights(const std::vector<Frame> &, const Settings &);
 QJsonArray calibrationPlan(const std::vector<Frame> &);
+std::string calibrationRevision(const std::vector<Frame> &, const Settings &);
+bool preparationReady(const std::vector<Frame> &, const Settings &);
+uint64_t previewDiskBudget(const Settings &);
+void calibrate(Project &, const fs::path &directory = {}, const Progress & = {});
 Image previewFrame(Project &, int64_t id, bool &calibrated);
 void analyze(Project &, const Progress & = {});
 void stack(Project &, const fs::path &outputDirectory, const Progress & = {});

@@ -12,9 +12,9 @@ int main(int argc, char **argv) {
     app.setApplicationName("SideraStack");
     app.setApplicationVersion(SIDERASTACK_VERSION);
     QCommandLineParser parser;
-    parser.setApplicationDescription(
-        "SideraStack: linear astrophotography masters\nCommands: init, import, analyze, stack, resume, "
-        "export, masters, inspect, convert, list, calibration, settings, edit");
+    parser.setApplicationDescription("SideraStack: linear astrophotography masters\nCommands: init, import, "
+                                     "calibrate, analyze, stack, resume, "
+                                     "export, masters, inspect, convert, list, calibration, settings, edit");
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addOption({"json", "Emit structured progress events"});
@@ -78,6 +78,10 @@ int main(int argc, char **argv) {
             return 0;
         }
         ss::Project project(path);
+        if (events)
+            project.frameChanged = [&](int64_t id) {
+                event({{"event", "frame-updated"}, {"id", qint64(id)}});
+            };
         if (command == "import") {
             std::vector<ss::fs::path> paths;
             for (int i = 2; i < args.size(); ++i)
@@ -85,6 +89,11 @@ int main(int argc, char **argv) {
             if (paths.empty())
                 throw ss::Error("import requires input files or folders");
             ss::importFiles(project, paths, progress);
+        } else if (command == "calibrate") {
+            if (args.size() > 3)
+                throw ss::Error("calibrate accepts a project and optional prepared-image directory");
+            ss::calibrate(project, args.size() == 3 ? ss::fs::path(args[2].toStdString()) : ss::fs::path{},
+                          progress);
         } else if (command == "analyze")
             ss::analyze(project, progress);
         else if (command == "stack" || command == "resume") {

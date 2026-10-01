@@ -11,6 +11,7 @@ The same engine runs without a display. Paths and IDs are passed as arguments:
 ./build/siderastack-cli import /data/target.sidera /data/night1 /data/night2
 ./build/siderastack-cli calibration /data/target.sidera
 ./build/siderastack-cli masters /data/target.sidera /data/calibration-masters --flat-calibration bias
+./build/siderastack-cli calibrate /data/target.sidera --json
 ./build/siderastack-cli analyze /data/target.sidera --json
 ./build/siderastack-cli list /data/target.sidera
 ./build/siderastack-cli edit /data/target.sidera --ids 17,24 --set '{"selection":-1}'
@@ -37,3 +38,15 @@ metadata; null removes a key. Calibration overrides use `SS_BIAS`, `SS_DARK`,
 Use `inspect FILE` to inspect decoded geometry, metadata and source SHA-256.
 SIGINT/SIGTERM cancel work at processing checkpoints (exit code 130).
 
+
+`calibration PROJECT` inspects automatic assignments and explains inferred or
+missing metadata. `calibrate PROJECT [DIRECTORY]` prepares lights and saves verified
+float FITS intermediates, reusing unchanged results. The default directory is
+`PROJECT.calibrated/`; an explicit directory is remembered. Analyze and Stack read
+these images and do not silently perform calibration. Rerun Calibrate and Analyze
+when inputs or assignments change, or a prepared image is missing/corrupt.
+
+With `--json`, newline-delimited `frame-updated` events contain the committed
+frame `id`, alongside existing progress/error/completion events. Import, Calibrate
+and Analyze emit these updates as work completes. A cancelled calibration retains
+completed prepared images; rerun the same command to continue.

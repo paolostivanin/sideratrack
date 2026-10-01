@@ -78,6 +78,105 @@ class Integration(unittest.TestCase):
         self.assertEqual(p.returncode != 0, fail, p.stdout + p.stderr)
         return p
 
+    def test_explicit_calibration_and_metadata_matching(self):
+        project, raw = self.camera_project()
+        # Match the real PixInsight case: headers omit gain/temperature/acquisition fields.
+        for p in list(raw.glob("dark*")) + list(raw.glob("bias*")):
+            with fits.open(p, mode="update") as hdus:
+                header = hdus[0].header
+                kind = "masterDark" if "dark" in p.name else "masterBias"
+                header["IMAGETYP"] = "Master Dark" if kind == "masterDark" else "Master Bias"
+                for key in ("GAIN", "CCD-TEMP", "OFFSET", "READOUTM"):
+                    header.pop(key, None)
+                hdus[0].add_checksum()
+            suffix = "__EXPOSURE_60.00s" if kind == "masterDark" else ""
+            p.rename(raw / (kind + suffix + "__GAIN_100__TEMP_-10.0__" + p.stem + ".fits"))
+        # Use one master of each kind rather than equally ranked duplicate masters.
+        for kind in ("masterDark", "masterBias"):
+            matches = sorted(raw.glob(kind + "*"))
+            for p in matches[1:]:
+                p.unlink()
+        project = self.root / "inferred.sidera"
+        self.run_cli("init", project)
+        self.run_cli("import", project, raw)
+        error = self.run_cli("analyze", project, fail=True)
+        self.assertIn("Calibrate first", error.stderr)
+        assignments = json.loads(self.run_cli("calibration", project).stdout)
+        self.assertTrue(all(len(row["dark"]) == 1 for row in assignments))
+        inferred = json.loads(self.run_cli("list", project).stdout)
+        dark = next(f for f in inferred if f["kind"] == "dark")
+        self.assertEqual(dark["header"]["GAIN"], 100)
+        self.assertEqual(dark["header"]["CCD-TEMP"], -10)
+        self.assertEqual(dark["metadataSources"]["GAIN"], "filename")
+        prepared = self.root / "prepared"
+        events = self.run_cli("calibrate", project, prepared, "--json")
+        self.assertIn('"event":"frame-updated"', events.stdout)
+        frames = json.loads(self.run_cli("list", project).stdout)
+        lights = [f for f in frames if f["kind"] == "light"]
+        self.assertTrue(all(Path(f["calibratedPath"]).is_file() for f in lights))
+        dates = {f["id"]: Path(f["calibratedPath"]).stat().st_mtime_ns for f in lights}
+        self.run_cli("calibrate", project)
+        self.assertEqual(dates, {f["id"]: Path(f["calibratedPath"]).stat().st_mtime_ns for f in lights})
+        self.run_cli("analyze", project)
+        reference = json.loads(self.run_cli("settings", project).stdout)["reference"]
+        damaged = next(f for f in lights if f["id"] != reference)
+        image = Path(damaged["calibratedPath"])
+        image.write_bytes(b"corrupt prepared image")
+        self.run_cli("analyze", project)
+        # Corruption is reported per frame and makes stacking reject that input.
+        rows = json.loads(self.run_cli("list", project).stdout)
+        self.assertIn("Calibrate again", next(f for f in rows if f["id"] == damaged["id"])["error"])
+        self.run_cli("calibrate", project)
+        self.run_cli("analyze", project)
+        # Known metadata conflicts must not be weakened by incomplete masters.
+        self.run_cli("edit", project, "--ids", dark["id"], "--set", json.dumps({"header": {"GAIN": 200}}))
+        plan = json.loads(self.run_cli("calibration", project).stdout)
+        self.assertTrue(all(not row["dark"] for row in plan))
+
+    def test_preparation_cancellation_and_publication_recovery(self):
+        project, raw = self.camera_project(size=512)
+        proc = subprocess.Popen([BINARY, "calibrate", str(project), "--json"], env=self.env,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cancelled = False
+        for line in proc.stdout:
+            event = json.loads(line)
+            if event.get("event") == "progress" and event.get("stage") == "calibrate" and event["done"] >= 1:
+                proc.send_signal(signal.SIGINT)
+                cancelled = True
+                break
+        stdout, stderr = proc.communicate(timeout=30)
+        self.assertTrue(cancelled)
+        self.assertEqual(proc.returncode, 130, stdout + stderr)
+        rows = json.loads(self.run_cli("list", project).stdout)
+        completed = [f for f in rows if f["kind"] == "light" and f["calibrationKey"]]
+        self.assertGreaterEqual(len(completed), 1)
+        self.assertLess(len(completed), 12)
+        timestamps = {f["id"]: Path(f["calibratedPath"]).stat().st_mtime_ns for f in completed}
+        self.run_cli("calibrate", project)
+        rows = json.loads(self.run_cli("list", project).stdout)
+        self.assertTrue(all(f["calibrationKey"] for f in rows if f["kind"] == "light"))
+        for frame in completed:
+            self.assertEqual(Path(frame["calibratedPath"]).stat().st_mtime_ns, timestamps[frame["id"]])
+        recovered = completed[0]
+        # Simulate interruption after atomic publication but before recording its prepared reference.
+        with sqlite3.connect(project) as db:
+            row = json.loads(db.execute("SELECT record FROM frames WHERE id=?", (recovered["id"],)).fetchone()[0])
+            row["calibrationKey"] = ""
+            row["calibratedPath"] = ""
+            db.execute("UPDATE frames SET record=? WHERE id=?", (json.dumps(row), recovered["id"]))
+        self.run_cli("calibrate", project)
+        self.assertEqual(Path(recovered["calibratedPath"]).stat().st_mtime_ns, timestamps[recovered["id"]])
+        # Recursive imports must not import these generated lights and calibrate them twice.
+        count = len(rows)
+        self.run_cli("import", project, Path(recovered["calibratedPath"]).parent)
+        self.assertEqual(len(json.loads(self.run_cli("list", project).stdout)), count)
+        missing = Path(recovered["calibratedPath"])
+        missing.unlink()
+        error = self.run_cli("analyze", project, fail=True)
+        self.assertIn("Calibrate first", error.stderr)
+        self.run_cli("calibrate", project)
+        self.run_cli("analyze", project)
+
     def test_independent_xisf_matrix(self):
         for dtype in ("uint8", "uint16", "uint32", "float32", "float64"):
             pixels = np.arange(3*16*20, dtype=np.float64).reshape(3,16,20)
@@ -153,6 +252,7 @@ class Integration(unittest.TestCase):
 
     def test_complete_camera_project_and_cache_equivalence(self):
         project, raw = self.camera_project()
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         frames=json.loads(self.run_cli("list",project).stdout)
         lights=[f for f in frames if f["kind"]=="light"]
@@ -178,8 +278,10 @@ class Integration(unittest.TestCase):
                 row=json.loads(record)
                 if row["kind"]=="light":
                     row["analysisKey"]=""
+                    row["calibrationKey"]=""
                     row["catalog"]=[]
                     db.execute("UPDATE frames SET record=? WHERE id=?",(json.dumps(row),id_))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         serial=json.loads(self.run_cli("list",project).stdout)
         for parallel,row in zip(frames,serial):
@@ -223,6 +325,7 @@ class Integration(unittest.TestCase):
         self.run_cli("init",project)
         self.run_cli("import",project,raw)
         self.run_cli("settings",project,"--set",json.dumps({"memory":128*1024**2,"scratch":64*1024**2,"threads":2}))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         out=self.root/"osc"
         self.run_cli("stack",project,out)
@@ -250,6 +353,7 @@ class Integration(unittest.TestCase):
         self.run_cli("init",project)
         self.run_cli("import",project,raw)
         self.run_cli("settings",project,"--set",json.dumps({"memory":128*1024**2,"scratch":64*1024**2,"threads":2}))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         out=self.root/"mono"
         self.run_cli("stack",project,out)
@@ -267,6 +371,7 @@ class Integration(unittest.TestCase):
     def test_cancellation_and_durable_resume(self):
         project, raw = self.camera_project(size=512)
         self.run_cli("settings",project,"--set",json.dumps({"memory":64*1024**2}))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         out=self.root/"interrupted"
         proc=subprocess.Popen([BINARY,"stack",str(project),str(out),"--json"],env=self.env,
@@ -291,6 +396,7 @@ class Integration(unittest.TestCase):
 
     def test_partial_publication_and_corrupt_cache(self):
         project, raw = self.camera_project()
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         settings=json.loads(self.run_cli("settings",project).stdout)
         cached=list(Path(settings["cacheDirectory"]).glob("cache-*.fits"))
@@ -344,6 +450,7 @@ class Integration(unittest.TestCase):
             header["IMAGETYP"]="Dark Flat"
             fits.writeto(raw/f"darkflat-{i}.fits",np.full((160,160),80,dtype=np.float32),header,checksum=True)
         self.run_cli("import",project,raw)
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         out=self.root/"calibrated"
         self.run_cli("stack",project,out)
@@ -366,6 +473,7 @@ class Integration(unittest.TestCase):
         import resource
         project,raw=self.camera_project(size=512)
         self.run_cli("settings",project,"--set",json.dumps({"memory":64*1024**2,"scratch":0}))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         source=raw/"light-00.fits"
         before=hashlib.sha256(source.read_bytes()).hexdigest()
@@ -441,6 +549,7 @@ class Integration(unittest.TestCase):
         self.run_cli("init",project)
         self.run_cli("import",project,raw)
         self.run_cli("settings",project,"--set",json.dumps({"memory":128*1024**2,"scratch":64*1024**2,"threads":2}))
+        self.run_cli("calibrate",project)
         self.run_cli("analyze",project)
         out=self.root/"mixed-units"
         self.run_cli("stack",project,out)

@@ -3,10 +3,10 @@
 Linux astrophotography stacking, from camera exposures to linear masters.
 
 SideraStack provides a Qt 6 desktop application and a command-line interface for
-**Import → Analyze → Review → Stack → Export**. Each project covers one target,
+**Import → Calibrate → Analyze → Review → Stack → Export**. Each project covers one target,
 camera and optical setup, with exposures from one or more nights.
 
-**Project status:** version 0.1.0 is an initial implementation for manual
+**Project status:** version 0.2.0 is an initial implementation for manual
 validation. Native Wayland/manual GUI validation and comparison with Siril
 remain to be completed. See [validation results](docs/VALIDATION.md).
 
@@ -62,9 +62,9 @@ each other.
 1. Create a project and import your lights and calibration files. Check frame
    type, filter, night and camera metadata; correct them in the frame table or
    with **Edit selected**.
-2. Open **Calibration**, review automatic assignments and resolve ambiguous
+2. Open **Calibration assignments**, review automatic assignments and resolve ambiguous
    matches. Mark imported calibration masters correctly.
-3. Run **Analyze**. Review star measurements and previews, and blink frames to
+3. Run **Calibrate** to save prepared lights, then **Analyze**. Review star measurements and previews, and blink frames to
    identify problems. Preview stretching does not change image data.
 4. Exclude unwanted frames, or configure quality limits in **Settings & grading**.
    Fix or exclude unreadable and unregistered frames before stacking. Processing
@@ -75,7 +75,8 @@ each other.
 For calibration matching rules, reusable master creation, grading and stacking
 options, see the [desktop workflow guide](docs/WORKFLOW.md).
 
-**Cancellation and recovery:** after cancelled analysis, run **Analyze** again.
+**Cancellation and recovery:** after cancelled calibration, run **Calibrate** again;
+after cancelled analysis, run **Analyze** again.
 After cancelled integration, use **Resume** with the same output directory.
 Completed stages are saved and verified before reuse; existing unrelated outputs
 are never silently overwritten.
@@ -90,6 +91,7 @@ calibration frames in the imported inputs and review assignments before analysis
 ./build/siderastack-cli init /data/target.sidera
 ./build/siderastack-cli import /data/target.sidera /data/night1 /data/night2
 ./build/siderastack-cli calibration /data/target.sidera
+./build/siderastack-cli calibrate /data/target.sidera --json
 ./build/siderastack-cli analyze /data/target.sidera --json
 ./build/siderastack-cli list /data/target.sidera
 ./build/siderastack-cli stack /data/target.sidera /data/masters --json

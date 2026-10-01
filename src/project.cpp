@@ -1,5 +1,6 @@
 #include "siderastack/core.hpp"
 #include <QDateTime>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <algorithm>
 #include <fstream>
@@ -73,6 +74,9 @@ QJsonObject Frame::toJson(bool catalog) const {
                   {"selection", selection},
                   {"error", QString::fromStdString(error)},
                   {"analysisKey", QString::fromStdString(analysisKey)},
+                  {"calibrationKey", QString::fromStdString(calibrationKey)},
+                  {"calibratedPath", QString::fromStdString(calibratedPath.string())},
+                  {"metadataSources", metadataSources},
                   {"width", descriptor.width},
                   {"height", descriptor.height},
                   {"channels", descriptor.channels},
@@ -103,6 +107,9 @@ Frame Frame::fromJson(const QJsonObject &o) {
     f.selection = o["selection"].toInt();
     f.error = str(o, "error");
     f.analysisKey = str(o, "analysisKey");
+    f.calibrationKey = str(o, "calibrationKey");
+    f.calibratedPath = str(o, "calibratedPath");
+    f.metadataSources = o["metadataSources"].toObject();
     f.descriptor.width = o["width"].toInt();
     f.descriptor.height = o["height"].toInt();
     f.descriptor.channels = o["channels"].toInt(1);
@@ -138,6 +145,10 @@ void editFrame(Frame &frame, const QJsonObject &changes) {
                     throw Error("Metadata values must be text, numbers, logicals, or null");
             }
             o["header"] = h;
+            auto sources = o["metadataSources"].toObject();
+            for (auto field = updates.begin(); field != updates.end(); ++field)
+                sources[field.key()] = "manual";
+            o["metadataSources"] = sources;
         } else if (it.key() == "kind" || it.key() == "filter" || it.key() == "session") {
             if (!it.value().isString() || it.value().toString().trimmed().isEmpty())
                 throw Error("Frame type, filter, and night must be nonempty text");
@@ -159,6 +170,34 @@ void editFrame(Frame &frame, const QJsonObject &changes) {
         throw Error("Unknown frame type");
     normalizeMetadata(updated.descriptor);
     frame = std::move(updated);
+}
+void inferMetadata(Frame &frame) {
+    const auto name = QString::fromStdString(frame.path.stem().string());
+    struct Token {
+        const char *token, *key;
+    };
+    for (const auto &[token, key] :
+         {Token{"GAIN", "GAIN"}, Token{"TEMP", "CCD-TEMP"}, Token{"EXPOSURE", "EXPTIME"}}) {
+        if (frame.descriptor.header.contains(key) || frame.metadataSources[key] == "manual" ||
+            (std::string(key) == "EXPTIME" && frame.descriptor.header.contains("EXPOSURE")))
+            continue;
+        QRegularExpression pattern("(?:^|__)" + QString(token) +
+                                       "_([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))" +
+                                       (std::string(token) == "EXPOSURE" ? "s" : "") + "(?=__|$)",
+                                   QRegularExpression::CaseInsensitiveOption);
+        auto match = pattern.match(name);
+        if (!match.hasMatch())
+            continue;
+        // Conflicting repeated named tokens cannot establish a value.
+        if (pattern.match(name, match.capturedEnd()).hasMatch())
+            continue;
+        bool ok = false;
+        auto value = match.captured(1).toDouble(&ok);
+        if (!ok || !std::isfinite(value) || (std::string(token) == "EXPOSURE" && value < 0))
+            continue;
+        frame.descriptor.header[key] = value;
+        frame.metadataSources[key] = "filename";
+    }
 }
 QJsonObject Settings::toJson() const {
     return {{"memory", qint64(memory)},
@@ -329,6 +368,26 @@ std::vector<Frame> Project::frames() const {
     }
     return v;
 }
+std::vector<Frame> Project::calibrationFrames() const {
+    Statement query(db_, "SELECT id,record FROM frames WHERE json_extract(record,'$.kind') "
+                         "IN ('bias','dark','flat','darkflat') ORDER BY id");
+    std::vector<Frame> result;
+    while (query.step() == SQLITE_ROW) {
+        auto frame = Frame::fromJson(parseJson(query.bytes(1)));
+        frame.id = sqlite3_column_int64(query.p, 0);
+        result.push_back(std::move(frame));
+    }
+    return result;
+}
+std::optional<Frame> Project::frame(int64_t id) const {
+    Statement q(db_, "SELECT record FROM frames WHERE id=?");
+    sqlite3_bind_int64(q.p, 1, id);
+    if (q.step() != SQLITE_ROW)
+        return {};
+    auto result = Frame::fromJson(parseJson(q.bytes(0)));
+    result.id = id;
+    return result;
+}
 void Project::save(Frame &f) {
     const auto bytes = json(f.toJson()).toStdString();
     if (f.id) {
@@ -343,6 +402,10 @@ void Project::save(Frame &f) {
         q.step();
         f.id = sqlite3_last_insert_rowid(db_);
     }
+    if (inTransaction_)
+        changedFrames_.insert(f.id);
+    else if (frameChanged)
+        frameChanged(f.id);
 }
 void Project::record(const std::string &key, const QJsonObject &value) {
     Statement q(
@@ -366,13 +429,23 @@ void Project::settings(const Settings &s) {
 }
 void Project::transaction(const std::function<void()> &fn) {
     exec("BEGIN IMMEDIATE");
+    inTransaction_ = true;
+    changedFrames_.clear();
     try {
         fn();
         exec("COMMIT");
     } catch (...) {
         exec("ROLLBACK");
+        inTransaction_ = false;
+        changedFrames_.clear();
         throw;
     }
+    inTransaction_ = false;
+    auto changed = std::move(changedFrames_);
+    changedFrames_.clear();
+    if (frameChanged)
+        for (auto id : changed)
+            frameChanged(id);
 }
 void importFiles(Project &project, const std::vector<fs::path> &roots, const Progress &progress) {
     std::set<fs::path> paths, existing;
@@ -403,6 +476,12 @@ void importFiles(Project &project, const std::vector<fs::path> &roots, const Pro
             f.path = path;
             try {
                 f.descriptor = readImage(path, true);
+                if (f.descriptor.header.contains("SSPREP")) {
+                    if (progress)
+                        progress("import", ++done, paths.size(),
+                                 "Skipping managed prepared image " + path.filename().string());
+                    continue;
+                }
                 f.kind = kindOf(f.descriptor);
                 f.filter = str(f.descriptor.header, "FILTER",
                                f.descriptor.channels == 3 || !f.descriptor.cfa.empty() ? "OSC" : "Unknown");
@@ -411,6 +490,7 @@ void importFiles(Project &project, const std::vector<fs::path> &roots, const Pro
                 f.master = QString::fromStdString(str(f.descriptor.header, "IMAGETYP"))
                                .contains("master", Qt::CaseInsensitive);
                 f.biasSubtracted = f.descriptor.header["BIASSUB"].toBool();
+                inferMetadata(f);
             } catch (const std::exception &e) {
                 f.error = e.what();
             }

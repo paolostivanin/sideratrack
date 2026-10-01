@@ -23,6 +23,7 @@ class FrameModel : public QAbstractTableModel {
     std::vector<ss::Frame> frames;
     ss::Project *project = nullptr;
     bool busy = false;
+    QHash<qlonglong, int> rowsById;
     std::function<void()> changed;
     int rowCount(const QModelIndex &p = {}) const override {
         return p.isValid() ? 0 : int(frames.size());
@@ -86,10 +87,17 @@ class FrameModel : public QAbstractTableModel {
         case 15:
             return std::isfinite(f.metrics.residual) ? QVariant(f.metrics.residual) : QVariant("—");
         case 16:
-            return !f.error.empty()    ? q(f.error)
-                   : f.transform.valid ? "Ready"
-                   : f.stars.empty()   ? "Not analyzed"
-                                       : "Measured";
+            if (!f.error.empty())
+                return q(f.error);
+            if (f.kind == "unknown")
+                return "Assign frame type";
+            if (f.kind != "light")
+                return f.master ? "Calibration master" : "Calibration frame";
+            if (f.master)
+                return "Light master";
+            return f.transform.valid ? "Ready"
+                   : f.stars.empty() ? (f.calibrationKey.empty() ? "Needs calibration" : "Calibrated")
+                                     : "Measured";
         default:
             return {};
         }
@@ -145,9 +153,29 @@ class FrameModel : public QAbstractTableModel {
             return false;
         }
     }
+    void updateFrame(int64_t id) {
+        if (!project)
+            return;
+        auto frame = project->frame(id);
+        if (!frame)
+            return;
+        if (auto it = rowsById.find(id); it != rowsById.end()) {
+            frames[size_t(*it)] = std::move(*frame);
+            Q_EMIT dataChanged(index(*it, 0), index(*it, columns.size() - 1));
+        } else {
+            int row = int(frames.size());
+            beginInsertRows({}, row, row);
+            rowsById[id] = row;
+            frames.push_back(std::move(*frame));
+            endInsertRows();
+        }
+    }
     void reload() {
         beginResetModel();
         frames = project ? project->frames() : std::vector<ss::Frame>{};
+        rowsById.clear();
+        for (int row = 0; row < int(frames.size()); ++row)
+            rowsById[frames[size_t(row)].id] = row;
         endResetModel();
     }
 };
@@ -164,7 +192,10 @@ class ImageView : public QGraphicsView {
         setTransformationAnchor(AnchorUnderMouse);
         setMinimumSize(320, 240);
     }
-    void display(const QImage &image, const std::vector<ss::Star> &stars) {
+    void display(const QImage &image, const std::vector<ss::Star> &stars, bool preserve = false) {
+        auto previousSize = scene.sceneRect().size();
+        auto previousCenter = mapToScene(viewport()->rect().center());
+        auto previousTransform = transform();
         scene.clear();
         markers.clear();
         pixels = scene.addPixmap(QPixmap::fromImage(image));
@@ -176,7 +207,13 @@ class ImageView : public QGraphicsView {
             item->setVisible(starsVisible);
             markers.push_back(item);
         }
-        fitInView(scene.sceneRect(), Qt::KeepAspectRatio);
+        if (preserve && previousSize.width() > 0 && previousSize.height() > 0) {
+            setTransform(previousTransform);
+            scale(previousSize.width() / image.width(), previousSize.height() / image.height());
+            centerOn(previousCenter.x() * image.width() / previousSize.width(),
+                     previousCenter.y() * image.height() / previousSize.height());
+        } else
+            fitInView(scene.sceneRect(), Qt::KeepAspectRatio);
     }
     void wheelEvent(QWheelEvent *event) override {
         double f = event->angleDelta().y() > 0 ? 1.2 : 1 / 1.2;
@@ -262,7 +299,7 @@ class MetricPlot : public QWidget {
             select(id);
     }
 };
-QImage preview(const ss::Image &im, double &black, double &white, bool common) {
+QImage preview(const ss::Image &im, double &black, double &white, bool common, int maxEdge = 0) {
     if (!common || !std::isfinite(black) || !std::isfinite(white)) {
         std::vector<float> sample;
         size_t stride = std::max<size_t>(1, im.samples() / 200000);
@@ -277,13 +314,19 @@ QImage preview(const ss::Image &im, double &black, double &white, bool common) {
         if (white <= black)
             white = black + 1;
     }
-    QImage result(im.width, im.height, QImage::Format_RGB32);
+    auto size = QSize(im.width, im.height);
+    if (maxEdge > 0 && std::max(im.width, im.height) > maxEdge)
+        size.scale(maxEdge, maxEdge, Qt::KeepAspectRatio);
+    QImage result(size, QImage::Format_RGB32);
     if (result.isNull())
         throw ss::Error("Preview allocation failed");
-    for (int y = 0; y < im.height; ++y) {
+    for (int y = 0; y < result.height(); ++y) {
+        if (QThread::currentThread()->isInterruptionRequested())
+            throw ss::Error("Preview cancelled");
         auto *row = reinterpret_cast<QRgb *>(result.scanLine(y));
-        for (int x = 0; x < im.width; ++x) {
-            size_t i = size_t(y) * im.width + x;
+        for (int x = 0; x < result.width(); ++x) {
+            size_t i = size_t(y * int64_t(im.height) / result.height()) * im.width +
+                       x * int64_t(im.width) / result.width();
             int rgb[3];
             for (int c = 0; c < 3; ++c) {
                 double v = im.pixels[i + (im.channels == 3 ? size_t(c) * im.plane() : 0)];
@@ -294,6 +337,96 @@ QImage preview(const ss::Image &im, double &black, double &white, bool common) {
         }
     }
     return result;
+}
+struct CachedPreview {
+    QImage image;
+    bool calibrated = false;
+    double black = NAN, white = NAN;
+};
+QString previewKey(const ss::Frame &frame, const ss::fs::path &projectPath, double lo, double hi, bool common,
+                   const QString &calibration) {
+    QFileInfo source(q(frame.path.string())), prepared(q(frame.calibratedPath.string()));
+    QJsonObject state{{"project", q(projectPath.string())},
+                      {"id", qint64(frame.id)},
+                      {"source", source.absoluteFilePath()},
+                      {"identity", q(frame.identity)},
+                      {"size", source.size()},
+                      {"modified", source.lastModified().toMSecsSinceEpoch()},
+                      {"prepared", q(frame.calibrationKey)},
+                      {"preparedPath", prepared.absoluteFilePath()},
+                      {"preparedModified", prepared.lastModified().toMSecsSinceEpoch()},
+                      {"preparedSize", prepared.size()},
+                      {"header", frame.descriptor.header},
+                      {"cfa", q(frame.descriptor.cfa)},
+                      {"common", common},
+                      {"calibration", calibration},
+                      {"version", 1}};
+    if (common) {
+        ss::put(state, "black", lo);
+        ss::put(state, "white", hi);
+    }
+    return q(ss::hash(ss::json(state).toStdString()));
+}
+CachedPreview readPreviewCache(const ss::Settings &settings, const QString &key) {
+    CachedPreview result;
+    if (!ss::previewDiskBudget(settings))
+        return result;
+    auto path = q((settings.cacheDirectory / "previews").string()) + "/preview-" + key + ".png";
+    QImage image(path);
+    if (image.isNull() || image.text("key") != key || image.width() > 2048 || image.height() > 2048) {
+        QFile::remove(path);
+        return result;
+    }
+    bool loOk = false, hiOk = false;
+    result.black = image.text("black").toDouble(&loOk);
+    result.white = image.text("white").toDouble(&hiOk);
+    if (!loOk || !hiOk || !std::isfinite(result.black) || !std::isfinite(result.white) ||
+        result.white <= result.black) {
+        QFile::remove(path);
+        return {};
+    }
+    result.image = image;
+    result.calibrated = image.text("calibrated") == "1";
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly))
+        file.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime);
+    return result;
+}
+void writePreviewCache(const ss::Settings &settings, const QString &key, const CachedPreview &preview) {
+    const auto limit = ss::previewDiskBudget(settings);
+    if (!limit || QThread::currentThread()->isInterruptionRequested())
+        return;
+    auto image = preview.image;
+    image.setText("key", key);
+    image.setText("black", QString::number(preview.black, 'g', 17));
+    image.setText("white", QString::number(preview.white, 'g', 17));
+    image.setText("calibrated", preview.calibrated ? "1" : "0");
+    QByteArray encoded;
+    QBuffer buffer(&encoded);
+    buffer.open(QIODevice::WriteOnly);
+    if (!image.save(&buffer, "PNG") || uint64_t(encoded.size()) > limit)
+        return;
+    QDir directory(q((settings.cacheDirectory / "previews").string()));
+    if (!directory.mkpath("."))
+        return;
+    const auto path = directory.filePath("preview-" + key + ".png");
+    if (directory.exists("preview-" + key + ".png"))
+        return;
+    auto files = directory.entryInfoList({"preview-*.png"}, QDir::Files, QDir::Time | QDir::Reversed);
+    uint64_t used = 0;
+    for (const auto &file : files)
+        used += file.size();
+    for (const auto &file : files) {
+        if (used + uint64_t(encoded.size()) <= limit)
+            break;
+        if (QFile::remove(file.absoluteFilePath()))
+            used -= file.size();
+    }
+    if (used + uint64_t(encoded.size()) > limit || directory.exists("preview-" + key + ".png"))
+        return;
+    QSaveFile file(path);
+    if (file.open(QIODevice::WriteOnly) && file.write(encoded) == encoded.size())
+        file.commit();
 }
 class Window : public QMainWindow {
   public:
@@ -309,7 +442,19 @@ class Window : public QMainWindow {
     QLabel status, previewStatus;
     QPlainTextEdit log;
     QComboBox filter, metric;
-    QTimer blink;
+    QTimer blink, updateTimer;
+    QSet<qlonglong> changedFrameIds;
+    QCache<QString, CachedPreview> previewCache;
+    QSet<QString> failedPreviewKeys;
+    QString previewCalibration;
+    QPushButton *blinkButton = nullptr;
+    QDoubleSpinBox blinkInterval;
+    std::vector<int64_t> blinkIds;
+    size_t blinkCursor = 0;
+    bool pendingIsPrefetch = false;
+    int64_t displayedFrame = 0;
+    QAction *analyzeAction = nullptr;
+    size_t previewRenders = 0;
     QThread *previewThread = nullptr;
     int64_t pendingPreview = 0;
     uint64_t previewGeneration = 0;
@@ -375,7 +520,8 @@ class Window : public QMainWindow {
                     start("import", {p});
             },
             true);
-        action("Calibration", [this] { calibration(); }, true);
+        action("Calibration assignments", [this] { calibration(); }, true);
+        action("Calibrate", [this] { start("calibrate"); }, true);
         action(
             "Create masters",
             [this] {
@@ -408,7 +554,9 @@ class Window : public QMainWindow {
                 start("masters", arguments);
             },
             true);
-        action("Analyze", [this] { start("analyze"); }, true);
+        analyzeAction = action("Analyze", [this] { start("analyze"); }, true);
+        analyzeAction->setToolTip(
+            "Measure prepared lights. Run Calibrate first if preparation is missing or stale.");
         action("Settings & grading", [this] { settings(); }, true);
         action(
             "Stack",
@@ -451,8 +599,8 @@ class Window : public QMainWindow {
         cancel->setToolTip("Stop safely at the next processing checkpoint");
         auto *root = new QWidget;
         auto *layout = new QVBoxLayout(root);
-        auto *intro = new QLabel(
-            "Import → Analyze → Review → Stack → Export   ·   Linear masters for your image editor");
+        auto *intro = new QLabel("Import → Calibrate → Analyze → Review → Stack → Export   ·   Linear "
+                                 "masters for your image editor");
         intro->setMargin(8);
         layout->addWidget(intro);
         auto *controls = new QHBoxLayout;
@@ -465,7 +613,8 @@ class Window : public QMainWindow {
         auto *exclude = new QPushButton("Exclude selected");
         auto *include = new QPushButton("Include selected");
         auto *edit = new QPushButton("Edit selected");
-        auto *blinkButton = new QPushButton("Blink selection");
+        blinkButton = new QPushButton("Start blink");
+        blinkButton->setEnabled(false);
         blinkButton->setCheckable(true);
         auto *stars = new QCheckBox("Star overlay");
         stars->setChecked(true);
@@ -478,6 +627,13 @@ class Window : public QMainWindow {
         controls->addWidget(stars);
         controls->addWidget(common);
         controls->addWidget(blinkButton);
+        blinkInterval.setRange(0.1, 60);
+        blinkInterval.setSingleStep(0.1);
+        blinkInterval.setDecimals(1);
+        blinkInterval.setValue(1);
+        blinkInterval.setSuffix(" s / frame");
+        blinkInterval.setToolTip("Seconds between frames during blink playback");
+        controls->addWidget(&blinkInterval);
         layout->addLayout(controls);
         proxy.setSourceModel(&model);
         proxy.setFilterKeyColumn(-1);
@@ -515,8 +671,14 @@ class Window : public QMainWindow {
         setCentralWidget(root);
         status.setText("Create or open a project to begin");
         model.changed = [this] {
+            blinkButton->setChecked(false);
+            previewCache.clear();
+            black = white = NAN;
+            previewCalibration = q(ss::calibrationRevision(model.frames, project->settings()));
+            showCurrent();
             plot.update();
             summary();
+            updateReadiness();
         };
         plot.select = [this](int64_t id) {
             for (int i = 0; i < model.rowCount(); ++i)
@@ -531,15 +693,17 @@ class Window : public QMainWindow {
             plot.metric = s;
             plot.update();
         });
-        connect(&filter, &QComboBox::currentTextChanged, this,
-                [this](const QString &s) { proxy.setFilterFixedString(s == "All frames" ? QString() : s); });
+        connect(&filter, &QComboBox::currentTextChanged, this, [this](const QString &s) {
+            blinkButton->setChecked(false);
+            proxy.setFilterFixedString(s == "All frames" ? QString() : s);
+        });
         connect(exclude, &QPushButton::clicked, this, [this] { select(-1); });
         connect(include, &QPushButton::clicked, this, [this] { select(1); });
         connect(edit, &QPushButton::clicked, this, [this] { editSelected(); });
         connect(stars, &QCheckBox::toggled, &view, &ImageView::toggleStars);
         connect(common, &QCheckBox::toggled, this, [this](bool on) {
+            blinkButton->setChecked(false);
             commonStretch = on;
-            lastOutput = q(ss::str(project->record("output"), "directory"));
             ++previewGeneration;
             pendingPreview = 0;
             black = white = NAN;
@@ -547,51 +711,72 @@ class Window : public QMainWindow {
         });
         connect(table.selectionModel(), &QItemSelectionModel::currentRowChanged, this,
                 [this] { showCurrent(); });
+        connect(table.selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
+            blinkButton->setChecked(false);
+            blinkButton->setEnabled(project && table.selectionModel()->selectedRows().size() >= 2);
+        });
+        connect(table.horizontalHeader(), &QHeaderView::sortIndicatorChanged, this,
+                [this] { blinkButton->setChecked(false); });
         connect(blinkButton, &QPushButton::toggled, this, [this](bool on) {
-            if (on)
-                blink.start(800);
-            else
-                blink.stop();
-        });
-        connect(&blink, &QTimer::timeout, this, [this] {
-            auto rows = table.selectionModel()->selectedRows();
-            if (rows.size() < 2)
-                return;
-            int next = 0;
-            for (int i = 0; i < rows.size(); ++i)
-                if (rows[i].row() == table.currentIndex().row())
-                    next = (i + 1) % rows.size();
-            table.selectionModel()->setCurrentIndex(rows[next], QItemSelectionModel::NoUpdate);
-        });
-        connect(&worker, &QProcess::readyReadStandardOutput, this, [this] {
-            output += worker.readAllStandardOutput();
-            for (;;) {
-                auto pos = output.indexOf('\n');
-                if (pos < 0)
-                    break;
-                auto line = output.left(pos);
-                output.remove(0, pos + 1);
-                try {
-                    auto o = ss::parseJson(line);
-                    if (ss::str(o, "event") == "error") {
-                        log.appendPlainText(o["message"].toString());
-                        status.setText(o["message"].toString());
-                    } else if (ss::str(o, "event") == "progress") {
-                        double total = ss::number(o, "total", 0), done = ss::number(o, "done", 0);
-                        progress.setValue(total > 0 ? int(1000 * done / total) : 0);
-                        status.setText(o["stage"].toString() + " · " + o["message"].toString());
-                    }
-                } catch (...) {
-                    log.appendPlainText(QString::fromUtf8(line));
+            blink.stop();
+            ++previewGeneration;
+            pendingPreview = 0;
+            if (previewThread)
+                previewThread->requestInterruption();
+            blinkButton->setText(on ? "Stop blink" : "Start blink");
+            blinkIds.clear();
+            if (on) {
+                failedPreviewKeys.clear();
+                auto rows = table.selectionModel()->selectedRows();
+                std::sort(rows.begin(), rows.end(),
+                          [](const auto &a, const auto &b) { return a.row() < b.row(); });
+                for (auto row : rows)
+                    blinkIds.push_back(model.frames[size_t(proxy.mapToSource(row).row())].id);
+                if (blinkIds.size() < 2) {
+                    blinkButton->setChecked(false);
+                    return;
                 }
+                auto current = proxy.mapToSource(table.currentIndex());
+                auto id = current.isValid() ? model.frames[size_t(current.row())].id : blinkIds.front();
+                auto it = std::find(blinkIds.begin(), blinkIds.end(), id);
+                blinkCursor = it == blinkIds.end() ? 0 : size_t(it - blinkIds.begin());
             }
+            showCurrent();
         });
+        connect(&blinkInterval, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                [this](double seconds) {
+                    if (blink.isActive())
+                        blink.start(qRound(seconds * 1000));
+                });
+        connect(&blink, &QTimer::timeout, this, [this] {
+            blink.stop();
+            if (!blinkButton->isChecked() || blinkIds.size() < 2)
+                return;
+            blinkCursor = (blinkCursor + 1) % blinkIds.size();
+            auto it = model.rowsById.find(blinkIds[blinkCursor]);
+            if (it == model.rowsById.end()) {
+                blinkButton->setChecked(false);
+                return;
+            }
+            auto next = proxy.mapFromSource(model.index(*it, 0));
+            if (next == table.currentIndex())
+                showCurrent();
+            else
+                table.selectionModel()->setCurrentIndex(next, QItemSelectionModel::NoUpdate);
+        });
+        updateTimer.setSingleShot(true);
+        updateTimer.setInterval(100);
+        connect(&updateTimer, &QTimer::timeout, this, [this] { updateFrames(); });
+        connect(&worker, &QProcess::readyReadStandardOutput, this, [this] { readWorkerOutput(); });
         connect(&worker, &QProcess::readyReadStandardError, this,
                 [this] { log.appendPlainText(QString::fromUtf8(worker.readAllStandardError())); });
         connect(&worker, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [this](int code, QProcess::ExitStatus exit) {
+                    readWorkerOutput();
+                    updateFrames();
                     setBusy(false);
-                    reload();
+                    updateReadiness();
+                    summary();
                     if (code == 0 && exit == QProcess::NormalExit) {
                         progress.setValue(1000);
                         status.setText("Complete · " + status.text());
@@ -602,6 +787,7 @@ class Window : public QMainWindow {
                     }
                 });
         connect(&worker, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+            updateFrames();
             setBusy(false);
             error(worker.errorString());
         });
@@ -627,11 +813,17 @@ class Window : public QMainWindow {
         model.busy = busy;
         for (auto *a : jobActions)
             a->setEnabled(project && !busy);
+        updateReadiness();
     }
     void open(const QString &path) {
         if (worker.state() != QProcess::NotRunning)
             return;
         try {
+            blinkButton->setChecked(false);
+            changedFrameIds.clear();
+            updateTimer.stop();
+            previewCache.clear();
+            displayedFrame = 0;
             project = std::make_unique<ss::Project>(path.toStdString());
             model.project = project.get();
             setWindowTitle("SideraStack · " + QFileInfo(path).fileName());
@@ -648,6 +840,13 @@ class Window : public QMainWindow {
     void reload() {
         try {
             model.reload();
+            previewCache.clear();
+            failedPreviewKeys.clear();
+            black = white = NAN;
+            previewCalibration = q(ss::calibrationRevision(model.frames, project->settings()));
+            previewCache.setMaxCost(
+                int(std::min<uint64_t>(256 * ss::MiB, project->settings().memory / 16) / 1024));
+            updateReadiness();
             QSignalBlocker blocker(filter);
             auto current = filter.currentText();
             filter.clear();
@@ -663,6 +862,123 @@ class Window : public QMainWindow {
             summary();
         } catch (const std::exception &e) {
             error(e.what());
+        }
+    }
+    void readWorkerOutput() {
+        output += worker.readAllStandardOutput();
+        for (;;) {
+            auto pos = output.indexOf('\n');
+            if (pos < 0)
+                break;
+            auto line = output.left(pos);
+            output.remove(0, pos + 1);
+            try {
+                auto o = ss::parseJson(line);
+                if (ss::str(o, "event") == "error") {
+                    log.appendPlainText(o["message"].toString());
+                    status.setText(o["message"].toString());
+                } else if (ss::str(o, "event") == "frame-updated") {
+                    changedFrameIds.insert(o["id"].toInteger());
+                    if (!updateTimer.isActive())
+                        updateTimer.start();
+                } else if (ss::str(o, "event") == "progress") {
+                    double total = ss::number(o, "total", 0), done = ss::number(o, "done", 0);
+                    progress.setValue(total > 0 ? int(1000 * done / total) : 0);
+                    status.setText(o["stage"].toString() + " · " + o["message"].toString());
+                }
+            } catch (...) {
+                log.appendPlainText(QString::fromUtf8(line));
+            }
+        }
+    }
+    void updateReadiness() {
+        if (analyzeAction)
+            analyzeAction->setEnabled(project && !model.busy &&
+                                      ss::preparationReady(model.frames, project->settings()));
+    }
+    void updateFrames() {
+        updateTimer.stop();
+        auto ids = std::exchange(changedFrameIds, {});
+        if (!project)
+            return;
+        try {
+            for (auto id : ids) {
+                auto previousRow = model.rowsById.value(id, -1);
+                auto previousKey =
+                    previousRow >= 0 ? model.frames[size_t(previousRow)].calibrationKey : std::string{};
+                model.updateFrame(id);
+                const auto row = model.rowsById.value(id, -1);
+                if (row >= 0) {
+                    const auto &frame = model.frames[size_t(row)];
+                    auto name = q(frame.filter);
+                    if (!name.isEmpty() && filter.findText(name) < 0)
+                        filter.addItem(name);
+                    if (id == displayedFrame && frame.calibrationKey != previousKey) {
+                        black = white = NAN;
+                        showCurrent();
+                    } else if (id == displayedFrame && view.pixels) {
+                        // Updating metrics/catalogs must not decode or stretch the image again.
+                        auto image = view.pixels->pixmap().toImage();
+                        view.display(image, displayStars(frame, image), true);
+                    }
+                }
+            }
+            auto calibration = q(ss::calibrationRevision(model.frames, project->settings()));
+            if (calibration != previewCalibration) {
+                previewCalibration = calibration;
+                previewCache.clear();
+                black = white = NAN;
+                showCurrent();
+            }
+            plot.update();
+            if (!model.busy)
+                updateReadiness();
+        } catch (const std::exception &e) {
+            log.appendPlainText(QString::fromUtf8(e.what()));
+        }
+    }
+    std::vector<ss::Star> displayStars(const ss::Frame &frame, const QImage &image) {
+        auto stars = frame.stars;
+        for (auto &star : stars) {
+            star.x *= double(image.width()) / std::max(1, frame.descriptor.width);
+            star.y *= double(image.height()) / std::max(1, frame.descriptor.height);
+        }
+        return stars;
+    }
+    void presentPreview(const ss::Frame &frame, const CachedPreview &preview) {
+        black = preview.black;
+        white = preview.white;
+        view.display(preview.image, displayStars(frame, preview.image),
+                     blinkButton->isChecked() || displayedFrame == frame.id);
+        displayedFrame = frame.id;
+        previewStatus.setText(q(frame.path.filename().string()) +
+                              (preview.calibrated ? " · calibrated" : " · uncalibrated") +
+                              " · preview stretch only");
+        if (blinkButton->isChecked())
+            blink.start(qRound(blinkInterval.value() * 1000));
+    }
+    void prefetchNext() {
+        if (!project || previewThread || pendingPreview || !blinkButton->isChecked() || blinkIds.size() < 2)
+            return;
+        for (size_t offset = 1; offset <= std::min<size_t>(2, blinkIds.size() - 1); ++offset) {
+            auto id = blinkIds[(blinkCursor + offset) % blinkIds.size()];
+            auto row = model.rowsById.value(id, -1);
+            if (row < 0)
+                continue;
+            const auto &frame = model.frames[size_t(row)];
+            auto size = QSize(frame.descriptor.width, frame.descriptor.height);
+            if (std::max(size.width(), size.height()) > 2048)
+                size.scale(2048, 2048, Qt::KeepAspectRatio);
+            auto cost = (int64_t(size.width()) * size.height() * 4 + 1023) / 1024;
+            if (cost * int64_t(offset + 1) > previewCache.maxCost())
+                continue;
+            auto key = previewKey(frame, project->path(), black, white, commonStretch, previewCalibration);
+            if (!previewCache.contains(key) && !failedPreviewKeys.contains(key)) {
+                pendingPreview = id;
+                pendingIsPrefetch = true;
+                loadPreview();
+                return;
+            }
         }
     }
     void summary() {
@@ -714,6 +1030,7 @@ class Window : public QMainWindow {
             model.dataChanged(model.index(0, 0), model.index(model.rowCount() - 1, 16));
             plot.update();
             summary();
+            updateReadiness();
         } catch (const std::exception &e) {
             error(e.what());
         }
@@ -802,50 +1119,92 @@ class Window : public QMainWindow {
         if (!index.isValid())
             return;
         ++previewGeneration;
-        pendingPreview = model.frames[size_t(index.row())].id;
+        const auto &frame = model.frames[size_t(index.row())];
+        if (blinkButton->isChecked()) {
+            auto key = previewKey(frame, project->path(), black, white, commonStretch, previewCalibration);
+            if (auto cached = previewCache.object(key)) {
+                pendingPreview = 0;
+                presentPreview(frame, *cached);
+                prefetchNext();
+                return;
+            }
+        }
+        pendingPreview = frame.id;
+        pendingIsPrefetch = false;
         if (!previewThread)
             loadPreview();
     }
     void loadPreview() {
-        if (!pendingPreview)
+        if (!project || !pendingPreview)
             return;
-        auto it = std::find_if(model.frames.begin(), model.frames.end(),
-                               [this](const ss::Frame &f) { return f.id == pendingPreview; });
-        if (it == model.frames.end())
+        auto row = model.rowsById.value(pendingPreview, -1);
+        if (row < 0) {
+            pendingPreview = 0;
             return;
-        auto frame = *it;
+        }
+        auto frame = model.frames[size_t(row)];
+        const auto prefetch = pendingIsPrefetch;
         pendingPreview = 0;
-        previewStatus.setText("Loading " + q(frame.path.filename().string()));
+        const bool reduced = blinkButton->isChecked();
+        if (!prefetch)
+            previewStatus.setText("Loading " + q(frame.path.filename().string()));
         double lo = black, hi = white;
         bool common = commonStretch;
         const auto generation = previewGeneration;
         const auto projectPath = project->path();
-        previewThread = QThread::create([this, frame, lo, hi, common, projectPath, generation]() mutable {
+        const auto settings = project->settings();
+        const auto calibration = previewCalibration;
+        const auto key = previewKey(frame, projectPath, lo, hi, common, calibration);
+        previewThread = QThread::create([this, frame, lo, hi, common, projectPath, generation, prefetch,
+                                         reduced, settings, key, calibration]() mutable {
             try {
-                ss::Project snapshot(projectPath);
-                bool calibrated = false;
-                auto im = ss::previewFrame(snapshot, frame.id, calibrated);
-                auto image = preview(im, lo, hi, common);
+                auto preview = reduced ? readPreviewCache(settings, key) : CachedPreview{};
+                bool rendered = preview.image.isNull();
+                if (rendered) {
+                    ss::Project snapshot(projectPath);
+                    auto im = ss::previewFrame(snapshot, frame.id, preview.calibrated);
+                    preview.image = ::preview(im, lo, hi, common, reduced ? 2048 : 0);
+                    preview.black = lo;
+                    preview.white = hi;
+                    if (reduced)
+                        writePreviewCache(
+                            settings,
+                            previewKey(frame, projectPath, preview.black, preview.white, common, calibration),
+                            preview);
+                }
+                if (QThread::currentThread()->isInterruptionRequested())
+                    return;
                 QMetaObject::invokeMethod(
                     this,
-                    [this, image, frame, lo, hi, generation, calibrated] {
-                        if (generation != previewGeneration)
+                    [this, preview, frame, generation, prefetch, reduced, key, projectPath, rendered,
+                     calibration, common] {
+                        if (!project || project->path() != projectPath)
                             return;
-                        black = lo;
-                        white = hi;
-                        view.display(image, frame.stars);
-                        previewStatus.setText(q(frame.path.filename().string()) +
-                                              (calibrated ? " · calibrated" : " · raw exposure") +
-                                              " · preview stretch only");
+                        previewRenders += rendered;
+                        if (reduced) {
+                            int cost = int((preview.image.sizeInBytes() + 1023) / 1024);
+                            auto resolved = previewKey(frame, projectPath, preview.black, preview.white,
+                                                       common, calibration);
+                            previewCache.insert(resolved, new CachedPreview(preview), cost);
+                        }
+                        if (!prefetch && generation == previewGeneration) {
+                            auto row = model.rowsById.value(frame.id, -1);
+                            if (row >= 0)
+                                presentPreview(model.frames[size_t(row)], preview);
+                        }
                     },
                     Qt::QueuedConnection);
             } catch (const std::exception &e) {
                 auto message = QString::fromUtf8(e.what());
                 QMetaObject::invokeMethod(
                     this,
-                    [this, message, generation] {
-                        if (generation == previewGeneration)
+                    [this, message, generation, prefetch, key] {
+                        if (prefetch)
+                            failedPreviewKeys.insert(key);
+                        if (!prefetch && generation == previewGeneration) {
                             previewStatus.setText(message);
+                            blinkButton->setChecked(false);
+                        }
                     },
                     Qt::QueuedConnection);
             }
@@ -856,6 +1215,8 @@ class Window : public QMainWindow {
             done->deleteLater();
             if (pendingPreview)
                 loadPreview();
+            else
+                prefetchNext();
         });
         previewThread->start();
     }
@@ -964,28 +1325,74 @@ class Window : public QMainWindow {
         dialog.setWindowTitle("Calibration assignments");
         dialog.resize(900, 600);
         QVBoxLayout layout(&dialog);
-        auto *text = new QPlainTextEdit;
-        text->setReadOnly(true);
         auto plan = ss::calibrationPlan(model.frames);
-        QStringList lines;
-        for (const auto &v : plan) {
-            auto row = v.toObject();
-            QString line = "Frame " + QString::number(row["frame"].toInteger()) + " · " +
-                           row["session"].toString() + " · " + row["filter"].toString();
-            for (const char *kind : {"bias", "dark", "flat"})
-                line += "\n  " + QString(kind) + ": " +
-                        QString::fromUtf8(QJsonDocument(row[kind].toArray()).toJson(QJsonDocument::Compact));
+        QTableWidget assignments(int(plan.size()), 7);
+        assignments.setHorizontalHeaderLabels(
+            {"Night", "Filter", "Lights", "Dark", "Bias", "Flat", "Details"});
+        assignments.setEditTriggers(QAbstractItemView::NoEditTriggers);
+        assignments.setWordWrap(true);
+        for (int i = 0; i < plan.size(); ++i) {
+            auto row = plan[i].toObject();
+            QStringList notes;
+            QStringList names[3];
+            for (const auto &entry : row["details"].toArray()) {
+                auto detail = entry.toObject();
+                const auto kind = detail["kind"].toString();
+                names[kind == "dark" ? 0 : kind == "bias" ? 1 : 2] << detail["file"].toString();
+                const auto sources = detail["inferred"].toObject();
+                QStringList inferred;
+                for (auto it = sources.begin(); it != sources.end(); ++it)
+                    if (it.value() == "filename")
+                        inferred << it.key();
+                if (!inferred.empty())
+                    notes << detail["file"].toString() + ": " + inferred.join(", ") + " from filename";
+                QStringList missing;
+                for (auto value : detail["missing"].toArray())
+                    missing << value.toString();
+                if (!missing.empty())
+                    notes << detail["file"].toString() + ": missing " + missing.join(", ");
+            }
+            for (auto warning : row["warnings"].toArray())
+                notes << warning.toString();
             if (row.contains("error"))
-                line += "\n  ERROR: " + row["error"].toString();
-            lines << line;
+                notes << "Resolve: " + row["error"].toString();
+            QStringList cells{row["session"].toString(), row["filter"].toString(),
+                              QString::number(row["count"].toInt())};
+            for (const auto &list : names)
+                cells << (list.empty() ? "None" : list.join("\n"));
+            cells << notes.join("\n");
+            for (int column = 0; column < cells.size(); ++column) {
+                auto *item = new QTableWidgetItem(cells[column]);
+                item->setToolTip(cells[column]);
+                if (row.contains("error"))
+                    item->setForeground(QColor("#b93838"));
+                assignments.setItem(i, column, item);
+            }
         }
-        text->setPlainText(lines.join("\n\n"));
-        layout.addWidget(text);
+        assignments.horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        assignments.horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
+        assignments.resizeRowsToContents();
+        layout.addWidget(&assignments);
         auto *hint =
-            new QLabel("Choose overrides for the selected table rows. Automatic matches camera, binning, "
-                       "gain/offset, exposure, filter, and night. Empty matches are visible above.");
+            new QLabel("Calibrate automatically matches and prepares your lights. Known conflicts "
+                       "are rejected; missing metadata is disclosed above. To override a match, "
+                       "select its lights or flats in the main table and apply an assignment below.");
         hint->setWordWrap(true);
         layout.addWidget(hint);
+        QLineEdit directory(q(
+            ss::str(project->record("calibration"), "directory", project->path().string() + ".calibrated")));
+        QPushButton browse("Browse…");
+        QHBoxLayout directoryLayout;
+        directoryLayout.addWidget(new QLabel("Prepared light images"));
+        directoryLayout.addWidget(&directory, 1);
+        directoryLayout.addWidget(&browse);
+        layout.addLayout(&directoryLayout);
+        connect(&browse, &QPushButton::clicked, &dialog, [&] {
+            auto chosen = QFileDialog::getExistingDirectory(&dialog, "Prepared light images directory",
+                                                            directory.text());
+            if (!chosen.isEmpty())
+                directory.setText(chosen);
+        });
         QFormLayout form;
         std::array<QComboBox, 4> choices;
         QStringList kinds{"bias", "dark", "flat", "darkflat"};
@@ -996,10 +1403,17 @@ class Window : public QMainWindow {
             combo.addItem("None — explicitly skip", "none");
             std::map<std::string, std::vector<int64_t>> groups;
             for (const auto &f : model.frames)
-                if (q(f.kind) == kinds[i]) {
-                    auto label = f.session + " / " + f.filter + " / " +
-                                 ss::str(f.descriptor.header, "EXPTIME") +
-                                 (f.master ? " / master " + std::to_string(f.id) : " / raw");
+                if (q(f.kind) == kinds[i] && f.selection >= 0) {
+                    auto label = f.master ? f.path.filename().string()
+                                          : f.session + " / " + f.filter + " / " +
+                                                ss::str(f.descriptor.header, "EXPTIME") + "s / " +
+                                                ss::str(f.descriptor.header, "INSTRUME") + " / gain " +
+                                                ss::str(f.descriptor.header, "GAIN") + " / offset " +
+                                                ss::str(f.descriptor.header, "OFFSET") + " / temp " +
+                                                ss::str(f.descriptor.header, "CCD-TEMP") + " / bin " +
+                                                ss::str(f.descriptor.header, "XBINNING") + "x" +
+                                                ss::str(f.descriptor.header, "YBINNING") + " / " +
+                                                ss::str(f.descriptor.header, "READOUTM") + " / raw";
                     groups[label].push_back(f.id);
                 }
             for (const auto &[label, ids] : groups) {
@@ -1015,13 +1429,17 @@ class Window : public QMainWindow {
         layout.addWidget(&buttons);
         connect(buttons.button(QDialogButtonBox::Close), &QPushButton::clicked, &dialog, &QDialog::reject);
         connect(buttons.button(QDialogButtonBox::Apply), &QPushButton::clicked, &dialog, [&] {
-            if (selectedRows().empty()) {
-                QMessageBox::information(
-                    &dialog, "Select frames",
-                    "Select the lights or flats receiving these assignments in the main table first.");
+            bool changes = false;
+            for (const auto &combo : choices)
+                changes |= combo.currentData().toString() != "keep";
+            if (changes && selectedRows().empty()) {
+                QMessageBox::information(&dialog, "Select frames",
+                                         "Select the receiving lights or flats first.");
                 return;
             }
             try {
+                if (directory.text().trimmed().isEmpty())
+                    throw ss::Error("Choose a prepared-image directory");
                 project->transaction([&] {
                     for (auto row : selectedRows()) {
                         auto &f = model.frames[row];
@@ -1038,6 +1456,7 @@ class Window : public QMainWindow {
                         project->save(f);
                     }
                 });
+                project->record("calibration", {{"directory", directory.text().trimmed()}});
                 dialog.accept();
                 reload();
             } catch (const std::exception &e) {

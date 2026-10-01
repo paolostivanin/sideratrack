@@ -54,6 +54,80 @@ int main(int argc, char **argv) {
         f.selection = -1;
         project.save(f);
         require(project.frames().at(0).selection == -1, "persistent selection");
+        int notifications = 0;
+        project.frameChanged = [&](int64_t id) {
+            require(project.frame(id).has_value(), "frame update is readable after commit");
+            ++notifications;
+        };
+        project.transaction([&] {
+            project.save(f);
+            project.save(f);
+            require(notifications == 0, "transaction updates are deferred");
+        });
+        require(notifications == 1, "committed frame updates are coalesced");
+        try {
+            project.transaction([&] {
+                project.save(f);
+                throw ss::Error("rollback");
+            });
+        } catch (const ss::Error &) {
+        }
+        require(notifications == 1, "rolled-back frames are not announced");
+        ss::Frame light;
+        light.id = 10;
+        light.kind = "light";
+        light.filter = "L";
+        light.session = "night";
+        light.descriptor.width = light.descriptor.height = 160;
+        light.descriptor.header = {{"INSTRUME", "QHY268M"}, {"XBINNING", "1.0"},
+                                   {"YBINNING", 1},         {"GAIN", "0.0"},
+                                   {"OFFSET", 11},          {"READOUTM", "High Gain 2CMS"},
+                                   {"CCD-TEMP", "-0.0"},    {"EXPTIME", 30.0}};
+        auto master = light;
+        master.id = 11;
+        master.kind = "dark";
+        master.master = true;
+        master.session = "other";
+        master.descriptor.header.remove("GAIN");
+        master.descriptor.header.remove("CCD-TEMP");
+        master.descriptor.header.remove("OFFSET");
+        master.descriptor.header.remove("READOUTM");
+        master.path = dir / "masterDark__EXPOSURE_30.00s__GAIN_0__TEMP_0.00.xisf";
+        ss::inferMetadata(master);
+        require(ss::number(master.descriptor.header, "GAIN") == 0 &&
+                    ss::number(master.descriptor.header, "CCD-TEMP") == 0,
+                "filename metadata recovery");
+        auto cold = master;
+        cold.id = 12;
+        cold.descriptor.header["CCD-TEMP"] = -5;
+        auto plan = ss::calibrationPlan({light, master, cold});
+        require(plan[0].toObject()["dark"].toArray() == QJsonArray{11},
+                "unique compatible incomplete master");
+        require(!plan[0].toObject()["details"].toArray()[0].toObject()["missing"].toArray().isEmpty(),
+                "incomplete metadata is disclosed");
+        auto duplicate = master;
+        duplicate.id = 13;
+        require(ss::calibrationPlan({light, master, duplicate})[0].toObject().contains("error"),
+                "equally ranked masters require an override");
+        master.descriptor.header["GAIN"] = 1;
+        require(ss::calibrationPlan({light, master})[0].toObject()["dark"].toArray().isEmpty(),
+                "known gain conflict is rejected");
+        ss::inferMetadata(master);
+        require(ss::number(master.descriptor.header, "GAIN") == 1, "headers win over filename tokens");
+        ss::editFrame(master, {{"header", QJsonObject{{"GAIN", QJsonValue()}}}});
+        ss::inferMetadata(master);
+        require(!master.descriptor.header.contains("GAIN"), "manual missing values remain authoritative");
+        auto wrongExposure = cold;
+        wrongExposure.descriptor.header["CCD-TEMP"] = 0;
+        wrongExposure.descriptor.header["EXPTIME"] = 80;
+        require(ss::calibrationPlan({light, wrongExposure})[0].toObject()["dark"].toArray().isEmpty(),
+                "dark exposure mismatch is rejected");
+        auto raw = light;
+        raw.id = 14;
+        raw.kind = "dark";
+        raw.session = "night";
+        require(ss::calibrationPlan({light, cold, raw})[0].toObject()["dark"].toArray() == QJsonArray{14},
+                "more complete raw calibration remains usable");
         std::mt19937 rng(17);
         std::uniform_real_distribution<double> position(30, 450);
         std::vector<ss::Star> reference, source;
