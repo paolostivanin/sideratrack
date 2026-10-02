@@ -2,9 +2,9 @@ SEP 1.4.1 C library sources with local correctness fixes.
 Upstream: https://github.com/sep-developers/sep
 Commit: 4c3acca6ce357d74b050cb46481af00c0bc96e32
 License: LGPL-3.0-or-later; see the source headers and LICENSE files.
-Configure SIDERASTACK_SYSTEM_SEP=ON to use a distribution SEP package instead.
+Configure STELLASTACK_SYSTEM_SEP=ON to use a distribution SEP package instead.
 
-Local patch: siderastack-fixes.patch. Pixel-list stride is rounded to the
+Local patch: stellastack-fixes.patch. Pixel-list stride is rounded to the
 record alignment, offsetof replaces null-pointer member arithmetic, and duplicate
 cflux/flux allocations are removed. Detected with UBSan/LeakSanitizer.
 Distribution SEP builds are maintained independently and may need these fixes.

@@ -1080,7 +1080,7 @@ void plistinit(int hasconv, int hasvar) {
     plistexist_var = 0;
     plistexist_thresh = 0;
   }
-  /* SideraStack: appended float fields must not misalign the next record. */
+  /* Stellastack: appended float fields must not misalign the next record. */
   const size_t alignment = _Alignof(pbliststruct);
   plistsize = ((plistsize + alignment - 1) / alignment) * alignment;
 }

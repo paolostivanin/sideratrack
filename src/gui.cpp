@@ -1,4 +1,4 @@
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QProcess>
 #include <QThread>
 #include <QtWidgets>
@@ -463,7 +463,7 @@ class Window : public QMainWindow {
     QString lastOutput;
     QList<QAction *> jobActions;
     Window() {
-        setWindowTitle("SideraStack");
+        setWindowTitle("Stellastack");
         resize(1450, 900);
         setMinimumSize(900, 600);
         auto *toolbar = addToolBar("Workflow");
@@ -480,11 +480,11 @@ class Window : public QMainWindow {
         };
         action("New project", [this] {
             auto path =
-                QFileDialog::getSaveFileName(this, "New SideraStack project", {}, "SideraStack (*.sidera)");
+                QFileDialog::getSaveFileName(this, "New Stellastack project", {}, "Stellastack (*.stella)");
             if (path.isEmpty())
                 return;
-            if (!path.endsWith(".sidera"))
-                path += ".sidera";
+            if (!path.endsWith(".stella"))
+                path += ".stella";
             try {
                 if (ss::fs::exists(path.toStdString()))
                     throw ss::Error("Choose a new filename");
@@ -497,7 +497,7 @@ class Window : public QMainWindow {
             }
         });
         action("Open", [this] {
-            auto p = QFileDialog::getOpenFileName(this, "Open project", {}, "SideraStack (*.sidera)");
+            auto p = QFileDialog::getOpenFileName(this, "Open project", {}, "Stellastack (*.stella)");
             if (!p.isEmpty())
                 open(p);
         });
@@ -807,7 +807,7 @@ class Window : public QMainWindow {
         }
     }
     void error(const QString &message) {
-        QMessageBox::critical(this, "SideraStack", message);
+        QMessageBox::critical(this, "Stellastack", message);
     }
     void setBusy(bool busy) {
         model.busy = busy;
@@ -826,7 +826,7 @@ class Window : public QMainWindow {
             displayedFrame = 0;
             project = std::make_unique<ss::Project>(path.toStdString());
             model.project = project.get();
-            setWindowTitle("SideraStack · " + QFileInfo(path).fileName());
+            setWindowTitle("Stellastack · " + QFileInfo(path).fileName());
             lastOutput = q(ss::str(project->record("output"), "directory"));
             ++previewGeneration;
             pendingPreview = 0;
@@ -997,9 +997,9 @@ class Window : public QMainWindow {
     void start(const QString &command, QStringList extra = {}) {
         if (!project || worker.state() != QProcess::NotRunning)
             return;
-        auto binary = QCoreApplication::applicationDirPath() + "/siderastack-cli";
+        auto binary = QCoreApplication::applicationDirPath() + "/stellastack-cli";
         if (!QFileInfo::exists(binary)) {
-            error("siderastack-cli must be installed beside siderastack");
+            error("stellastack-cli must be installed beside stellastack");
             return;
         }
         output.clear();
@@ -1480,9 +1480,9 @@ class Window : public QMainWindow {
 } // namespace
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    app.setApplicationName("SideraStack");
-    app.setOrganizationName("SideraStack");
-    app.setApplicationVersion(SIDERASTACK_VERSION);
+    app.setApplicationName("Stellastack");
+    app.setOrganizationName("Stellastack");
+    app.setApplicationVersion(STELLASTACK_VERSION);
     Window window;
     auto args = app.arguments();
     if (args.size() > 1 && !args[1].startsWith("--"))

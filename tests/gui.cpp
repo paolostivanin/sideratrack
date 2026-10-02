@@ -1,5 +1,5 @@
 // Exercise the real internal widgets and supervised worker with synthetic projects.
-#define main siderastack_desktop_main
+#define main stellastack_desktop_main
 #include "../src/gui.cpp"
 #undef main
 #include <QElapsedTimer>
@@ -13,11 +13,11 @@ void check(bool ok, const char *message) {
 }
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    app.setApplicationName("SideraStack-gui-test");
+    app.setApplicationName("Stellastack-gui-test");
     QTemporaryDir temp;
     qputenv("XDG_CACHE_HOME", (temp.path() + "/cache").toUtf8());
     try {
-        if (auto existing = qEnvironmentVariable("SIDERASTACK_REVIEW_PROJECT"); !existing.isEmpty()) {
+        if (auto existing = qEnvironmentVariable("STELLASTACK_REVIEW_PROJECT"); !existing.isEmpty()) {
             Window actual;
             actual.open(existing);
             actual.show();
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
             auto renders = actual.previewRenders;
             QTest::qWait(1000);
             check(actual.previewRenders == renders, "real dataset warm playback avoids recomputation");
-            auto screenshot = qEnvironmentVariable("SIDERASTACK_REVIEW_SCREENSHOT");
+            auto screenshot = qEnvironmentVariable("STELLASTACK_REVIEW_SCREENSHOT");
             if (!screenshot.isEmpty())
                 check(actual.grab().save(screenshot), "real review screenshot");
             actual.blinkButton->setChecked(false);
@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         const auto root = ss::fs::path(temp.path().toStdString());
-        const auto projectPath = root / "scale.sidera";
+        const auto projectPath = root / "scale.stella";
         {
             ss::Project project(projectPath, true);
             project.transaction([&] {
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
               "GUI exports bias and flat masters");
         window.close();
         // Exercise real progressive analysis and cached playback in a separate valid project.
-        const auto reviewPath = root / "review.sidera";
+        const auto reviewPath = root / "review.stella";
         ss::Project reviewProject(reviewPath, true);
         auto reviewSettings = reviewProject.settings();
         reviewSettings.threads = 1;

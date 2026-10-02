@@ -1,5 +1,5 @@
 #include "converter.hpp"
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QCryptographicHash>
 #include <QFile>
 #include <QJsonDocument>

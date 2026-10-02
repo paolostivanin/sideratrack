@@ -1,8 +1,8 @@
-# SideraStack
+# Stellastack
 
 Linux astrophotography stacking, from camera exposures to linear masters.
 
-SideraStack provides a Qt 6 desktop application and a command-line interface for
+Stellastack provides a Qt 6 desktop application and a command-line interface for
 **Import → Calibrate → Analyze → Review → Stack → Export**. Each project covers one target,
 camera and optical setup, with exposures from one or more nights.
 
@@ -39,18 +39,18 @@ packages. Building requires:
 On openSUSE, Qt/demosaicing packages include `qt6-widgets-devel`,
 `qt6-test-devel` and `librtprocess-devel`. Install your distribution's development
 packages for the remaining dependencies. SEP 1.4.1 is bundled; distribution
-maintainers can select their SEP library with `-DSIDERASTACK_SYSTEM_SEP=ON`.
+maintainers can select their SEP library with `-DSTELLASTACK_SYSTEM_SEP=ON`.
 
 From the source directory:
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-./build/siderastack
+./build/stellastack
 ```
 
-Open an existing project with `./build/siderastack /data/target.sidera`.
-For a GUI-free build, add `-DSIDERASTACK_BUILD_GUI=OFF`; Qt Core remains required.
+Open an existing project with `./build/stellastack /data/target.stella`.
+For a GUI-free build, add `-DSTELLASTACK_BUILD_GUI=OFF`; Qt Core remains required.
 To omit tests and their dependencies, add `-DBUILD_TESTING=OFF`.
 
 Install binaries, desktop entry, icon and license notices with
@@ -88,17 +88,17 @@ example paths with your own project, input folders and output directories. Inclu
 calibration frames in the imported inputs and review assignments before analysis.
 
 ```sh
-./build/siderastack-cli init /data/target.sidera
-./build/siderastack-cli import /data/target.sidera /data/night1 /data/night2
-./build/siderastack-cli calibration /data/target.sidera
-./build/siderastack-cli calibrate /data/target.sidera --json
-./build/siderastack-cli analyze /data/target.sidera --json
-./build/siderastack-cli list /data/target.sidera
-./build/siderastack-cli stack /data/target.sidera /data/masters --json
-./build/siderastack-cli export /data/target.sidera /data/export --format xisf-zstd
+./build/stellastack-cli init /data/target.stella
+./build/stellastack-cli import /data/target.stella /data/night1 /data/night2
+./build/stellastack-cli calibration /data/target.stella
+./build/stellastack-cli calibrate /data/target.stella --json
+./build/stellastack-cli analyze /data/target.stella --json
+./build/stellastack-cli list /data/target.stella
+./build/stellastack-cli stack /data/target.stella /data/masters --json
+./build/stellastack-cli export /data/target.stella /data/export --format xisf-zstd
 ```
 
-Use `./build/siderastack-cli --help` for commands and global options. See the
+Use `./build/stellastack-cli --help` for commands and global options. See the
 [CLI reference](docs/CLI.md) for frame edits, settings, calibration-master
 creation, resume, inspection and conversion.
 
@@ -132,7 +132,7 @@ calibration units, integrity checks and memory/cache behavior.
 ```sh
 ctest --test-dir build --output-on-failure
 cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-  -DSIDERASTACK_BUILD_GUI=OFF -DSIDERASTACK_SANITIZERS=ON
+  -DSTELLASTACK_BUILD_GUI=OFF -DSTELLASTACK_SANITIZERS=ON
 cmake --build build-sanitize --parallel 2
 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-sanitize --output-on-failure
 ```
@@ -157,7 +157,7 @@ See the [real-camera validation](docs/VALIDATION.md),
 
 ## Licensing
 
-SideraStack is GPL-3.0-or-later. Format-handling code adapted from
+Stellastack is GPL-3.0-or-later. Format-handling code adapted from
 [xisf2fits](https://github.com/paolostivanin/xisf2fits) retains its MIT license in
 `src/xisf/LICENSE`. Bundled SEP is LGPL-3.0-or-later; its licenses, authors,
 upstream commit and local patch are under `vendor/sep`.

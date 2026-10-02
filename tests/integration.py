@@ -66,7 +66,7 @@ def xisf(path, pixels, codec=None, shuffle=False, subblocks=False, normal=False,
 
 class Integration(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="siderastack-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="stellastack-test-")
         self.root = Path(self.temp.name)
         self.env = dict(os.environ, XDG_CACHE_HOME=str(self.root / "cache"))
 
@@ -96,7 +96,7 @@ class Integration(unittest.TestCase):
             matches = sorted(raw.glob(kind + "*"))
             for p in matches[1:]:
                 p.unlink()
-        project = self.root / "inferred.sidera"
+        project = self.root / "inferred.stella"
         self.run_cli("init", project)
         self.run_cli("import", project, raw)
         error = self.run_cli("analyze", project, fail=True)
@@ -244,7 +244,7 @@ class Integration(unittest.TestCase):
             if i==7:
                 base[72,72]+=10000
             write(f"light-{i:02}.fits", (base+rng.normal(0,2,(h,w)))*flat+120, "Light", night="2026-09-20" if i<6 else "2026-09-21")
-        project=self.root/"project.sidera"
+        project=self.root/"project.stella"
         self.run_cli("init",project)
         self.run_cli("import",project,raw)
         self.run_cli("settings",project,"--set",json.dumps({"memory":128*1024**2,"scratch":64*1024**2 if cache else 0,"threads":2}))
@@ -386,13 +386,13 @@ class Integration(unittest.TestCase):
         stdout,stderr=proc.communicate(timeout=120)
         self.assertTrue(cancelled,stdout+stderr)
         self.assertEqual(proc.returncode,130,stdout+stderr)
-        self.assertTrue(list(out.glob(".siderastack-*/*.band")))
+        self.assertTrue(list(out.glob(".stellastack-*/*.band")))
         resumed=self.run_cli("resume",project,out,"--json")
         self.assertIn("Restored verified band",resumed.stdout)
         reference=self.root/"uninterrupted"
         self.run_cli("stack",project,reference)
         np.testing.assert_array_equal(fits.getdata(out/"L-master.fits"),fits.getdata(reference/"L-master.fits"))
-        self.assertFalse(list(out.glob(".siderastack-*")))
+        self.assertFalse(list(out.glob(".stellastack-*")))
 
     def test_partial_publication_and_corrupt_cache(self):
         project, raw = self.camera_project()
@@ -419,7 +419,7 @@ class Integration(unittest.TestCase):
         self.assertIn("Recovered L output publication",resumed.stdout)
         self.assertEqual((out/"L-master.fits").read_bytes(),before)
         self.assertEqual(len(list(out.glob("*.fits"))),4)
-        self.assertFalse(list(out.glob(".siderastack-*")))
+        self.assertFalse(list(out.glob(".stellastack-*")))
 
     def test_fits_long_strings_offsets_and_scaling(self):
         src=self.root/"long.fits"
@@ -520,7 +520,7 @@ class Integration(unittest.TestCase):
         self.run_cli("masters",project,still_bias,"--ids",flat_ids,"--flat-calibration","bias")
         np.testing.assert_array_equal(fits.getdata(next(still_bias.glob("flat-*-master.fits"))),bias_master)
         # Calibration-only projects can build masters without any lights or analysis.
-        standalone=self.root/"flat-only.sidera"
+        standalone=self.root/"flat-only.stella"
         self.run_cli("init",standalone)
         self.run_cli("import",standalone,*sorted(raw.glob("flat-*.fits")),*sorted(raw.glob("bias-*.fits")))
         self.run_cli("masters",standalone,self.root/"standalone","--flat-calibration","bias","--format","xisf-zstd")

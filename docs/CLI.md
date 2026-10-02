@@ -2,22 +2,22 @@
 
 [Back to the README](../README.md)
 
-Use `siderastack-cli --help` for available commands and global options.
+Use `stellastack-cli --help` for available commands and global options.
 
 The same engine runs without a display. Paths and IDs are passed as arguments:
 
 ```sh
-./build/siderastack-cli init /data/target.sidera
-./build/siderastack-cli import /data/target.sidera /data/night1 /data/night2
-./build/siderastack-cli calibration /data/target.sidera
-./build/siderastack-cli masters /data/target.sidera /data/calibration-masters --flat-calibration bias
-./build/siderastack-cli calibrate /data/target.sidera --json
-./build/siderastack-cli analyze /data/target.sidera --json
-./build/siderastack-cli list /data/target.sidera
-./build/siderastack-cli edit /data/target.sidera --ids 17,24 --set '{"selection":-1}'
-./build/siderastack-cli stack /data/target.sidera /data/masters --json
-./build/siderastack-cli resume /data/target.sidera /data/masters --json
-./build/siderastack-cli export /data/target.sidera /data/export --format xisf-zstd
+./build/stellastack-cli init /data/target.stella
+./build/stellastack-cli import /data/target.stella /data/night1 /data/night2
+./build/stellastack-cli calibration /data/target.stella
+./build/stellastack-cli masters /data/target.stella /data/calibration-masters --flat-calibration bias
+./build/stellastack-cli calibrate /data/target.stella --json
+./build/stellastack-cli analyze /data/target.stella --json
+./build/stellastack-cli list /data/target.stella
+./build/stellastack-cli edit /data/target.stella --ids 17,24 --set '{"selection":-1}'
+./build/stellastack-cli stack /data/target.stella /data/masters --json
+./build/stellastack-cli resume /data/target.stella /data/masters --json
+./build/stellastack-cli export /data/target.stella /data/export --format xisf-zstd
 ```
 
 `settings PROJECT` prints processing settings. Use `--set` to merge a JSON
@@ -28,11 +28,11 @@ metadata; null removes a key. Calibration overrides use `SS_BIAS`, `SS_DARK`,
 `SS_FLAT`, or `SS_DARKFLAT` with comma-separated IDs or `"none"`.
 
 ```sh
-./build/siderastack-cli settings /data/target.sidera \
+./build/stellastack-cli settings /data/target.stella \
   --set '{"memory":8589934592,"scratch":107374182400,"threads":18}'
-./build/siderastack-cli edit /data/target.sidera --ids 31 \
+./build/stellastack-cli edit /data/target.stella --ids 31 \
   --set '{"header":{"BAYERPAT":"RGGB","EXPTIME":60}}'
-./build/siderastack-cli convert exposure.fits.fz exposure.xisf --format xisf-zstd
+./build/stellastack-cli convert exposure.fits.fz exposure.xisf --format xisf-zstd
 ```
 
 Use `inspect FILE` to inspect decoded geometry, metadata and source SHA-256.

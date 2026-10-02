@@ -1,4 +1,4 @@
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <Eigen/Dense>
 #include <rtprocess/librtprocess.h>
 #include <tbb/parallel_for.h>
@@ -32,7 +32,7 @@ void sepCheck(int s) {
         throw Error(std::string("Star extraction: ") + msg);
     }
 }
-#ifndef SIDERASTACK_THREADSAFE_SEP
+#ifndef STELLASTACK_THREADSAFE_SEP
 std::mutex sepMutex;
 #endif
 } // namespace
@@ -52,7 +52,7 @@ std::vector<Star> measure(const Image &input, Metrics &metrics) {
     view.mask = mask.data();
     view.mdtype = SEP_TBYTE;
     view.maskthresh = 0;
-#ifndef SIDERASTACK_THREADSAFE_SEP
+#ifndef STELLASTACK_THREADSAFE_SEP
     std::lock_guard lock(sepMutex);
 #endif
     sep_bkg *rawBackground = nullptr;

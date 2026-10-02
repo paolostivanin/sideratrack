@@ -1,5 +1,5 @@
 #include "converter.hpp"
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QCryptographicHash>
 #include <QFile>
 #include <QLockFile>
@@ -18,7 +18,7 @@
 
 namespace ss {
 namespace {
-constexpr const char *algorithm = "siderastack-pipeline-5";
+constexpr const char *algorithm = "stellastack-pipeline-5";
 void emit(const Progress &p, const std::string &stage, size_t n, size_t total, const std::string &detail) {
     if (p)
         p(stage, n, total, detail);
@@ -1108,7 +1108,7 @@ void stack(Project &project, const fs::path &output, const Progress &progress) {
             emit(progress, "stack", group.size(), group.size(), "Reused verified " + filter + " master");
             continue;
         }
-        const auto staging = fs::absolute(output) / (".siderastack-" + runKey);
+        const auto staging = fs::absolute(output) / (".stellastack-" + runKey);
         auto pending = project.record("pending:" + filter);
         if (str(pending, "key") == runKey && str(pending, "path") == fs::absolute(final).string()) {
             publishBundle(pending);
@@ -1233,7 +1233,7 @@ void stack(Project &project, const fs::path &output, const Progress &progress) {
         master.header["IMAGETYP"] = "Master Light";
         master.header["NCOMBINE"] = int(group.size());
         master.header["EXPTIME"] = exposure;
-        master.header["CREATOR"] = "SideraStack " SIDERASTACK_VERSION;
+        master.header["CREATOR"] = "Stellastack " STELLASTACK_VERSION;
         master.header["HISTORY"] =
             "Linear weighted average; calibrated before debayering; common reference " +
             QString::number(settings.reference) + "; inverse-variance weights; " +
@@ -1366,7 +1366,7 @@ void createCalibrationMasters(Project &project, const fs::path &output, const st
             project.record(pendingKey, {});
             results.append(pending);
             std::error_code ignored;
-            fs::remove_all(fs::absolute(output) / (".siderastack-calibration-" + runKey), ignored);
+            fs::remove_all(fs::absolute(output) / (".stellastack-calibration-" + runKey), ignored);
             continue;
         }
         if (fs::exists(destination))
@@ -1376,7 +1376,7 @@ void createCalibrationMasters(Project &project, const fs::path &output, const st
         auto product = engine.master(group, group.front().kind);
         auto im = *product;
         im.header["NCOMBINE"] = int(group.size());
-        im.header["CREATOR"] = "SideraStack " SIDERASTACK_VERSION;
+        im.header["CREATOR"] = "Stellastack " STELLASTACK_VERSION;
         if (group.front().kind == "flat") {
             im.header["CALMETH"] = QString::fromStdString(policy);
             im.header["HISTORY"] =
@@ -1387,7 +1387,7 @@ void createCalibrationMasters(Project &project, const fs::path &output, const st
                 it = im.header.erase(it);
             else
                 ++it;
-        const auto staging = fs::absolute(output) / (".siderastack-calibration-" + runKey);
+        const auto staging = fs::absolute(output) / (".stellastack-calibration-" + runKey);
         fs::create_directories(staging);
         auto staged = staging / ("calibration" + extension(format));
         // The named staged file and manifest survive a cancelled publication.

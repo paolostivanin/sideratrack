@@ -1,4 +1,4 @@
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -9,10 +9,10 @@
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
-    app.setApplicationName("SideraStack");
-    app.setApplicationVersion(SIDERASTACK_VERSION);
+    app.setApplicationName("Stellastack");
+    app.setApplicationVersion(STELLASTACK_VERSION);
     QCommandLineParser parser;
-    parser.setApplicationDescription("SideraStack: linear astrophotography masters\nCommands: init, import, "
+    parser.setApplicationDescription("Stellastack: linear astrophotography masters\nCommands: init, import, "
                                      "calibrate, analyze, stack, resume, "
                                      "export, masters, inspect, convert, list, calibration, settings, edit");
     parser.addHelpOption();

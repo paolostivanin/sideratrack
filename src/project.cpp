@@ -1,4 +1,4 @@
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QDateTime>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -340,10 +340,10 @@ Project::Project(const fs::path &path, bool create) : path_(fs::absolute(path)) 
         version.step();
         int v = sqlite3_column_int(version.p, 0);
         if (v > 1)
-            throw Error("This project requires a newer SideraStack version");
+            throw Error("This project requires a newer Stellastack version");
         if (v == 0) {
             if (!create)
-                throw Error("Not a SideraStack project");
+                throw Error("Not a Stellastack project");
             exec(
                 "CREATE TABLE frames(id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE,record TEXT NOT NULL); "
                 "CREATE TABLE records(key TEXT PRIMARY KEY,value TEXT NOT NULL); PRAGMA user_version=1;");

@@ -1,4 +1,4 @@
-#include "siderastack/core.hpp"
+#include "stellastack/core.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <iostream>
@@ -10,7 +10,7 @@ void require(bool ok, const char *message) {
 }
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
-    app.setApplicationName("SideraStack-test");
+    app.setApplicationName("Stellastack-test");
     try {
         QTemporaryDir temp;
         require(temp.isValid(), "temporary directory");
@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
             }
             require(failed, "no overwrite by default");
         }
-        ss::Project project(dir / "test.sidera", true);
+        ss::Project project(dir / "test.stella", true);
         ss::Frame f;
         f.path = dir / "example.fits";
         f.kind = "light";

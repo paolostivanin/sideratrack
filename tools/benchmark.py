@@ -61,7 +61,7 @@ def measure(binary, command, project, extra, directory, cache):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project", type=Path)
-    parser.add_argument("--binary", type=Path, default=Path("build/siderastack-cli"))
+    parser.add_argument("--binary", type=Path, default=Path("build/stellastack-cli"))
     parser.add_argument("--work", required=True, type=Path, help="New empty benchmark directory")
     parser.add_argument("--threads", type=int)
     parser.add_argument("--memory-mib", type=int)
@@ -70,7 +70,7 @@ def main():
     args = parser.parse_args()
     args.work = args.work.resolve()
     args.work.mkdir(parents=True, exist_ok=False)
-    project = args.work / "benchmark.sidera"
+    project = args.work / "benchmark.stella"
     cache = args.work / "cache"
     cache.mkdir()
     with sqlite3.connect(f"file:{args.project.resolve()}?mode=ro", uri=True) as source, sqlite3.connect(project) as copy:
