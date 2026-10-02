@@ -80,13 +80,34 @@ machine/dataset measurement, not a repeatability study or comparison with Siril.
 
 ## Automated checks and remaining validation
 
-The release build passes the core, independent-format/workflow and GUI suites.
-The GUI suite exercises a 10,000-frame model with five million catalog stars,
-numeric sorting, persistent edits, asynchronous import and calibration exports.
-The core and independent suites also pass AddressSanitizer,
-UndefinedBehaviorSanitizer and LeakSanitizer. A temporary installation successfully
-launched the real project using Qt's offscreen platform; native desktop interaction
-still requires manual validation.
+The redesigned release build passes the core, independent-format/workflow,
+GUI workflow and GUI appearance suites. The GUI suite exercises a 10,000-frame
+model with five million catalog stars, numeric sorting, persistent edits and
+asynchronous import. It also covers chained preparation, group assignments,
+grading and alignment blockers, completed-result previews and exports,
+failure/cancellation recovery, checkpoint and completed-project reopening,
+keyboard navigation, small windows and runtime light/dark palette changes.
+Both GUI suites pass with 150% display scaling. The complete GUI workflow suite
+also passes on the native Wayland and X11 platforms, including small windows
+and keyboard navigation. Wayland tests remap the window before resizing, since
+the compositor can retain a mapped window's configured size.
+The initial implementation's core and independent suites also passed
+AddressSanitizer, UndefinedBehaviorSanitizer and LeakSanitizer. A temporary installation successfully
+launched the real project using Qt's offscreen platform. A manual walkthrough
+with real exposures and first-time-user usability validation remain outstanding.
+
+To capture the synthetic GUI workflow or run it on a native desktop:
+
+```sh
+STELLASTACK_UI_SCREENSHOTS=/tmp/stellastack-ui ctest --test-dir build -R gui- --output-on-failure
+QT_QPA_PLATFORM=wayland ./build/gui-tests
+QT_QPA_PLATFORM=xcb ./build/gui-tests
+QT_SCALE_FACTOR=1.5 ctest --test-dir build -R gui- --output-on-failure
+```
+
+Tests isolate project files, preview caches and desktop preferences in temporary
+directories. Screenshots use synthetic star fields and do not validate image
+quality against a real camera dataset.
 
 Known-truth tests cover OSC and LRGBSHO, bias/dark/flat/dark-flat calibration,
 explicit user choice of bias versus dark-flat for flats, multiple nights and
@@ -97,6 +118,6 @@ caches disabled produces identical master, coverage, weight and rejection pixels
 to parallel cached execution; independently measured metrics/transforms agree
 exactly too.
 
-Real OSC/SHO validation, native Wayland/X11 interaction, a full 10,000-exposure
+Real OSC/SHO validation, manual desktop usability validation, a full 10,000-exposure
 processing run and matched-quality Siril benchmarks remain outstanding. Mosaics,
 GPU processing, drizzle and live stacking are deferred in the accepted scope.

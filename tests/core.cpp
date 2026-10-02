@@ -83,6 +83,49 @@ int main(int argc, char **argv) {
                                    {"YBINNING", 1},         {"GAIN", "0.0"},
                                    {"OFFSET", 11},          {"READOUTM", "High Gain 2CMS"},
                                    {"CCD-TEMP", "-0.0"},    {"EXPTIME", 30.0}};
+        auto sameGroup = light;
+        sameGroup.id = 20;
+        auto grouped = ss::calibrationPlan({light, sameGroup});
+        require(grouped.size() == 1 && grouped[0].toObject()["frameIds"].toArray() == QJsonArray{10, 20},
+                "calibration groups expose every receiving frame");
+        std::vector<ss::Frame> gradeFrames(8, light);
+        for (size_t i = 0; i < gradeFrames.size(); ++i) {
+            gradeFrames[i].id = i + 1;
+            gradeFrames[i].metrics.fwhm = i + 1;
+            gradeFrames[i].metrics.eccentricity = .1;
+        }
+        gradeFrames[2].selection = 1;
+        gradeFrames[3].metrics.fwhm = NAN;
+        gradeFrames[4].filter = gradeFrames[5].filter = gradeFrames[6].filter = "Ha";
+        gradeFrames[4].selection = -1;
+        gradeFrames[5].metrics.fwhm = 1;
+        gradeFrames[7].metrics.fwhm = 1.8;
+        auto grading = project.settings();
+        grading.maxFwhm = 2;
+        grading.keepPercent = 50;
+        auto decisions = ss::evaluateSelection(gradeFrames, grading);
+        auto accepted = ss::selectedLights(gradeFrames, grading);
+        std::vector<int64_t> expected{1, 3, 6, 8}, actual;
+        for (const auto &frame : accepted)
+            actual.push_back(frame.id);
+        require(actual == expected, "grading preserves per-filter percentile and manual overrides");
+        require(decisions[2].included && !decisions[1].included && !decisions[3].included &&
+                    !decisions[4].included,
+                "effective inclusion is independent of the automatic/manual flag");
+        require(decisions[1].reason.find("percentage") != std::string::npos &&
+                    decisions[3].reason.find("FWHM limit") != std::string::npos &&
+                    decisions[4].reason == "Manually excluded",
+                "grading exposes actionable exclusion reasons");
+        grading.maxFwhm = 0;
+        grading.keepPercent = 100;
+        grading.maxEccentricity = .5;
+        gradeFrames[7].metrics.eccentricity = .9;
+        decisions = ss::evaluateSelection(gradeFrames, grading);
+        require(!decisions[7].included && decisions[7].reason.find("eccentricity") != std::string::npos,
+                "eccentricity exclusions are explained");
+        gradeFrames[7].selection = 1;
+        require(ss::evaluateSelection(gradeFrames, grading)[7].included,
+                "manual inclusion overrides eccentricity");
         auto master = light;
         master.id = 11;
         master.kind = "dark";

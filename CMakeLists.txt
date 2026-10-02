@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
-project(Stellastack VERSION 0.2.0 LANGUAGES C CXX)
+project(Stellastack VERSION 0.99.1 LANGUAGES C CXX)
+set(STELLASTACK_RELEASE_VERSION "${PROJECT_VERSION}-alpha.1")
+set(STELLASTACK_DISPLAY_VERSION "${PROJECT_VERSION} - Alpha 1")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -36,7 +38,9 @@ target_include_directories(stellastack_core PUBLIC include PRIVATE src/xisf)
 target_link_libraries(stellastack_core PUBLIC Qt6::Core PkgConfig::cfitsio
   PkgConfig::libxml_2_0 PkgConfig::liblz4 PkgConfig::libzstd PkgConfig::sqlite3
   PkgConfig::rtprocess OpenSSL::Crypto ZLIB::ZLIB TBB::tbb Eigen3::Eigen sep)
-target_compile_definitions(stellastack_core PUBLIC STELLASTACK_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(stellastack_core PUBLIC
+  STELLASTACK_VERSION="${STELLASTACK_RELEASE_VERSION}"
+  STELLASTACK_DISPLAY_VERSION="${STELLASTACK_DISPLAY_VERSION}")
 target_compile_definitions(stellastack_core PUBLIC QT_NO_KEYWORDS)
 if(NOT STELLASTACK_SYSTEM_SEP)
   target_compile_definitions(stellastack_core PRIVATE STELLASTACK_THREADSAFE_SEP)
@@ -55,8 +59,23 @@ include(GNUInstallDirs)
 install(TARGETS stellastack-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(STELLASTACK_BUILD_GUI)
   find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
+  add_library(stellastack_gui STATIC src/gui/window.cpp src/gui/pages.cpp src/gui/workflow.cpp src/gui/widgets.cpp)
+  target_include_directories(stellastack_gui PUBLIC src)
+  target_link_libraries(stellastack_gui PUBLIC stellastack_core Qt6::Widgets)
+  target_compile_options(stellastack_gui PRIVATE -Wall -Wextra -Wpedantic)
+  qt_add_resources(stellastack_gui icons PREFIX "/" BASE data FILES
+    data/org.stellastack.Stellastack.svg
+    data/icons/document-import.svg
+    data/icons/adjustments.svg
+    data/icons/view-preview.svg
+    data/icons/layers.svg
+    data/icons/task-complete.svg
+    data/icons/list-add.svg
+    data/icons/folder-open.svg
+    data/icons/preferences-system.svg
+  )
   add_executable(stellastack src/gui.cpp)
-  target_link_libraries(stellastack PRIVATE stellastack_core Qt6::Widgets)
+  target_link_libraries(stellastack PRIVATE stellastack_gui)
   install(TARGETS stellastack RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   install(FILES data/org.stellastack.Stellastack.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
   install(FILES data/org.stellastack.Stellastack.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
@@ -72,9 +91,10 @@ if(BUILD_TESTING)
   if(STELLASTACK_BUILD_GUI)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
     add_executable(gui-tests tests/gui.cpp)
-    target_link_libraries(gui-tests PRIVATE stellastack_core Qt6::Widgets Qt6::Test)
+    target_link_libraries(gui-tests PRIVATE stellastack_gui Qt6::Test)
     add_test(NAME gui-scale COMMAND gui-tests)
-    set_tests_properties(gui-scale PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
+    add_test(NAME gui-appearance COMMAND gui-tests --appearance-test)
+    set_tests_properties(gui-scale gui-appearance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
   endif()
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

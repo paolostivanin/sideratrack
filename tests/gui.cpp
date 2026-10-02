@@ -1,7 +1,6 @@
 // Exercise the real internal widgets and supervised worker with synthetic projects.
-#define main stellastack_desktop_main
-#include "../src/gui.cpp"
-#undef main
+#include "gui/window.hpp"
+using namespace ss::gui;
 #include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QtTest/QTest>
@@ -13,10 +12,43 @@ void check(bool ok, const char *message) {
 }
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    app.setOrganizationName("Stellastack-tests");
     app.setApplicationName("Stellastack-gui-test");
     QTemporaryDir temp;
     qputenv("XDG_CACHE_HOME", (temp.path() + "/cache").toUtf8());
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path() + "/config");
+    auto capture = [&](Window &window, const QString &name) {
+        auto directory = qEnvironmentVariable("STELLASTACK_UI_SCREENSHOTS");
+        if (directory.isEmpty())
+            return;
+        QDir().mkpath(directory);
+        QTest::qWait(100);
+        check(window.grab().save(directory + "/" + name + ".png"), "UI screenshot");
+    };
     try {
+        if (app.arguments().contains("--appearance-test")) {
+            Window appearance;
+            appearance.show();
+            auto dark = app.palette();
+            dark.setColor(QPalette::Window, QColor("#252a32"));
+            dark.setColor(QPalette::WindowText, Qt::white);
+            dark.setColor(QPalette::Base, QColor("#1d2229"));
+            dark.setColor(QPalette::Text, Qt::white);
+            app.setPalette(dark);
+            QTest::qWait(20);
+            check(appearance.pageTitle.palette().color(QPalette::WindowText) == Qt::white,
+                  "palette changes update styled descendants");
+            capture(appearance, "welcome-dark");
+            return 0;
+        }
+        {
+            Window welcome;
+            welcome.show();
+            check(welcome.welcomeOrProject->currentIndex() == 0, "first launch shows welcome");
+            check(!welcome.analyzeAction->isEnabled(), "no processing without a project");
+            capture(welcome, "welcome");
+        }
         if (auto existing = qEnvironmentVariable("STELLASTACK_REVIEW_PROJECT"); !existing.isEmpty()) {
             Window actual;
             actual.open(existing);
@@ -51,17 +83,10 @@ int main(int argc, char **argv) {
             while (actual.previewThread && wait.elapsed() < 30000)
                 QTest::qWait(20);
             check(actual.view.pixels->pixmap().width() == 6252, "real stop restores full resolution");
-            QTimer::singleShot(200, [&] {
-                for (auto *widget : QApplication::topLevelWidgets())
-                    if (auto *dialog = qobject_cast<QDialog *>(widget);
-                        dialog && dialog->windowTitle() == "Calibration assignments") {
-                        if (!screenshot.isEmpty())
-                            check(dialog->grab().save(screenshot + ".calibration.png"),
-                                  "calibration summary screenshot");
-                        dialog->reject();
-                    }
-            });
             actual.calibration();
+            QTest::qWait(100);
+            if (!screenshot.isEmpty())
+                check(actual.grab().save(screenshot + ".calibration.png"), "calibration page screenshot");
             std::cout << "Real dataset GUI playback and assignment review passed\n";
             return 0;
         }
@@ -92,6 +117,7 @@ int main(int argc, char **argv) {
         Window window;
         window.open(QString::fromStdString(projectPath.string()));
         window.show();
+        window.navigate(Window::Review);
         QTest::qWait(100);
         check(window.model.rowCount() == 10000, "10,000 frame model");
         check(elapsed.elapsed() < 10000, "10,000 frame open time exceeds ten seconds");
@@ -105,6 +131,15 @@ int main(int argc, char **argv) {
         auto index = window.model.index(0, 0);
         check(window.model.setData(index, Qt::Unchecked, Qt::CheckStateRole), "exclude frame");
         check(window.project->frames()[0].selection == -1, "persist exclusion");
+        window.filter.setCurrentIndex(window.filter.findData("L"));
+        check(window.proxy.rowCount() == 5000, "filter matches the filter field exactly");
+        window.nightFilter.setCurrentIndex(window.nightFilter.findData("night-1"));
+        check(window.proxy.rowCount() == 2500, "night and filter predicates combine");
+        window.metric.setCurrentText("HFR");
+        window.plot.repaint();
+        check(window.plot.points.size() == 2500, "plot contains only visible exposures");
+        window.filter.setCurrentIndex(0);
+        window.nightFilter.setCurrentIndex(0);
         window.setBusy(true);
         check(!window.model.setData(index, Qt::Checked, Qt::CheckStateRole), "busy edits disabled");
         window.setBusy(false);
@@ -185,6 +220,7 @@ int main(int argc, char **argv) {
         Window review;
         review.open(QString::fromStdString(reviewPath.string()));
         review.show();
+        review.resize(1450, 900);
         auto finish = [&] {
             elapsed.restart();
             while ((review.worker.state() != QProcess::NotRunning || review.model.busy) &&
@@ -198,6 +234,8 @@ int main(int argc, char **argv) {
         review.start("calibrate");
         finish();
         check(review.analyzeAction->isEnabled(), "calibration enables analysis");
+        review.navigate(Window::Review);
+        review.table.clearSelection();
         review.proxy.sort(8, Qt::DescendingOrder);
         std::vector<int64_t> selected;
         for (int row = 0; row < review.model.rowCount() && selected.size() < 2; ++row)
@@ -274,7 +312,260 @@ int main(int argc, char **argv) {
         check(review.previewRenders == renders && review.previewCache.size() >= 2,
               "evicted RAM previews are restored from disk without recomputing");
         review.blinkButton->setChecked(false);
+        elapsed.restart();
+        while (review.previewThread && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        capture(review, "review");
+        review.navigate(Window::Calibration);
+        capture(review, "calibration");
+        review.prepare();
+        finish();
+        check(!review.preparationSequence && review.pages->currentIndex() == Window::Review,
+              "Prepare frames chains calibration and analysis then opens Review");
+        check(review.readiness.canStack, "current prepared exposures are ready for stacking");
+
+        // Assignment edits act on the page's group, independently of the review selection.
+        review.navigate(Window::Calibration);
+        review.assignments.selectRow(0);
+        review.updateCalibrationGroup();
+        review.calibrationChoices[0].setCurrentIndex(review.calibrationChoices[0].findData("none"));
+        review.applyCalibrationGroup();
+        for (const auto &frame : review.model.frames)
+            if (frame.kind == "light")
+                check(ss::str(frame.descriptor.header, "SS_BIAS") == "none",
+                      "override targets every group member");
+        check(!review.readiness.canPrepare && !review.readiness.canStack,
+              "missing calibration blocks preparation and stacking");
+        review.calibrationChoices[0].setCurrentIndex(0);
+        review.applyCalibrationGroup();
+        check(review.readiness.canPrepare, "automatic assignments can be restored");
+        review.prepare();
+        finish();
+
+        // An included but unusable exposure blocks stacking even with manual inclusion.
+        auto original = *std::find_if(review.model.frames.begin(), review.model.frames.end(),
+                                      [](const auto &frame) { return frame.kind == "light"; });
+        auto unusable = original;
+        unusable.transform.valid = false;
+        unusable.selection = 1;
+        review.project->save(unusable);
+        review.model.updateFrame(unusable.id);
+        review.updateReadiness();
+        check(!review.readiness.canStack && review.readiness.frameProblems.contains(unusable.id),
+              "manual inclusion never bypasses alignment failures");
+        {
+            Window reopened;
+            reopened.open(QString::fromStdString(reviewPath.string()));
+            check(reopened.pages->currentIndex() == Window::Review,
+                  "reopening analyzed frames with alignment failures returns to review");
+        }
+        unusable.selection = -1;
+        review.project->save(unusable);
+        review.model.updateFrame(unusable.id);
+        review.updateReadiness();
+        check(review.readiness.canStack, "excluding an unusable frame resolves its blocker");
+        review.project->save(original);
+        review.model.updateFrame(original.id);
+        review.updateReadiness();
+
+        review.navigate(Window::Stack);
+        review.stackDirectory.setText(QString::fromStdString((root / "gui-stack").string()));
+        capture(review, "stack");
+        review.runPrimary();
+        finish();
+        check(review.pages->currentIndex() == Window::Results && review.products.size() == 1 &&
+                  review.readiness.resultsCurrent,
+              "completed stack opens current results");
+        elapsed.restart();
+        while (review.resultThread && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(review.resultView.pixels, "completed master has an asynchronous preview");
+        capture(review, "results");
+        auto completed = review.project->record("results");
+        auto checkpoint = review.project->record("checkpoint");
+        auto masterResult = completed["masters"].toArray()[0].toObject();
+        review.project->record("results", {});
+        review.project->record("checkpoint",
+                               {{"stage", "stack"}, {"key", masterResult["key"]}, {"filter", "L"}});
+        review.open(QString::fromStdString(reviewPath.string()));
+        check(review.readiness.resumable && review.pages->currentIndex() == Window::Stack &&
+                  review.primary.text() == "Resume stack",
+              "reopening an interrupted stack offers compatible checkpoints");
+        review.project->record("results", completed);
+        review.project->record("checkpoint", checkpoint);
+        review.updateReadiness();
+        review.refreshResults();
+        review.navigate(Window::Results);
+        review.exportDirectory.setText(QString::fromStdString((root / "gui-export").string()));
+        review.exportFormat.setCurrentIndex(3);
+        review.exportResults();
+        finish();
+        check(ss::fs::exists(root / "gui-export" / "L-master.xisf"),
+              "GUI exports completed masters in the chosen format");
+        auto excluded = original;
+        excluded.selection = -1;
+        review.project->save(excluded);
+        review.model.updateFrame(excluded.id);
+        review.updateReadiness();
+        check(!review.readiness.resultsCurrent, "selection changes mark saved outputs as a previous stack");
+        review.project->save(original);
+        review.model.updateFrame(original.id);
+        review.updateReadiness();
+
+        // Control a worker deterministically to exercise failure and cancellation boundaries.
+        const auto fakePath = temp.path() + "/controlled-worker";
+        const auto modePath = temp.path() + "/worker-mode";
+        const auto callsPath = temp.path() + "/worker-calls";
+        QFile controlled(fakePath);
+        check(controlled.open(QIODevice::WriteOnly), "create controlled worker");
+        QByteArray program = "#!/usr/bin/python3\nimport sys, signal, time, json\n";
+        program += "mode = open(" +
+                   QJsonDocument(QJsonArray{modePath}).toJson(QJsonDocument::Compact).mid(1).chopped(1) +
+                   ").read()\n";
+        program += "with open(" +
+                   QJsonDocument(QJsonArray{callsPath}).toJson(QJsonDocument::Compact).mid(1).chopped(1) +
+                   ", 'a') as log: log.write(sys.argv[1] + '\\n')\n";
+        program +=
+            "signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n"
+            "if mode == 'failure':\n print(json.dumps({'event': 'error', 'message': 'Calibration failed'}), "
+            "flush=True)\n sys.exit(1)\n"
+            "if mode == 'cancel':\n print(json.dumps({'event': 'progress', 'stage': 'calibrate', 'done': 0, "
+            "'total': 1, 'message': 'Waiting for cancellation'}), flush=True)\n time.sleep(30)\n"
+            "time.sleep(.1)\nprint(json.dumps({'event': 'complete'}), flush=True)\n";
+        check(controlled.write(program) == program.size(), "write controlled worker");
+        controlled.close();
+        check(controlled.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner),
+              "controlled worker executable");
+        auto configureWorker = [&](const char *mode) {
+            QFile config(modePath);
+            check(config.open(QIODevice::WriteOnly | QIODevice::Truncate), "worker scenario");
+            config.write(mode);
+            config.close();
+            QFile calls(callsPath);
+            check(calls.open(QIODevice::WriteOnly | QIODevice::Truncate), "clear worker history");
+            review.workerBinary = fakePath;
+            review.navigate(Window::Calibration);
+        };
+        auto calls = [&] {
+            QFile file(callsPath);
+            check(file.open(QIODevice::ReadOnly), "worker command history");
+            return file.readAll();
+        };
+        configureWorker("failure");
+        review.prepare();
+        elapsed.restart();
+        while (review.model.busy && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(!review.model.busy && !review.preparationSequence && calls() == "calibrate\n",
+              "calibration failure never launches analysis");
+        check(!review.recoverJob.isHidden(), "failed preparation offers recovery");
+        configureWorker("cancel");
+        review.prepare();
+        elapsed.restart();
+        while (!review.jobMessage.contains("Waiting for cancellation") && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(review.jobMessage.contains("Waiting for cancellation"), "controlled worker ready to cancel");
+        review.cancelProcessing();
+        elapsed.restart();
+        while (review.model.busy && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(!review.model.busy && !review.preparationSequence && calls() == "calibrate\n",
+              "cancellation prevents analysis even when the worker exits successfully");
+        configureWorker("success");
+        review.workerBinary = temp.path() + "/missing-worker";
+        review.prepare();
+        elapsed.restart();
+        while (review.model.busy && elapsed.elapsed() < 10000)
+            QTest::qWait(20);
+        check(!review.model.busy && !review.preparationSequence && calls().isEmpty(),
+              "failed startup clears the preparation sequence");
+        configureWorker("success");
+        review.prepare();
+        review.navigate(Window::Stack);
+        finish();
+        check(calls() == "calibrate\nanalyze\n" && review.pages->currentIndex() == Window::Stack &&
+                  !review.viewCompletion.isHidden(),
+              "completion respects navigation during preparation");
+        review.workerBinary.clear();
+
+        // Keep grading previews transactional, and exercise all contextual dialogs.
+        for (auto section : {Window::Resources, Window::Registration, Window::Grading, Window::Integration}) {
+            auto before = review.project->settings().toJson();
+            QTimer::singleShot(20, [&] {
+                for (auto *widget : QApplication::topLevelWidgets())
+                    if (auto *dialog = qobject_cast<QDialog *>(widget))
+                        dialog->reject();
+            });
+            review.settings(section);
+            check(review.project->settings().toJson() == before,
+                  "cancelled settings preserve processing configuration");
+        }
+        auto preciseBudgets = review.project->settings();
+        preciseBudgets.memory += 123;
+        preciseBudgets.scratch += 321;
+        review.project->settings(preciseBudgets);
+        auto beforeGrading = review.project->settings().toJson();
+        QTimer::singleShot(20, [&] {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = qobject_cast<QDialog *>(widget))
+                    dialog->accept();
+        });
+        review.settings(Window::Grading);
+        check(review.project->settings().toJson() == beforeGrading,
+              "saving grading leaves hidden resource and registration settings unchanged");
+        // Wayland compositors can retain the configured size of a mapped toplevel.
+        // Remap it with the requested small size before testing each page's layout.
+        review.hide();
+        review.resize(900, 600);
+        review.show();
+        QTest::qWait(200);
+        for (int stage = Window::Import; stage <= Window::Results; ++stage) {
+            review.navigate(Window::Stage(stage));
+            QTest::qWait(20);
+            check(review.size() == QSize(900, 600),
+                  qPrintable(QString("stage %1 fits the minimum window size (actual %2 × %3)")
+                                 .arg(stage)
+                                 .arg(review.width())
+                                 .arg(review.height())));
+            if (stage == Window::Review)
+                check(review.plot.mapToGlobal(QPoint()).y() >=
+                          review.view.mapToGlobal(QPoint(0, review.view.height())).y(),
+                      "small-window quality controls do not overlap the preview");
+            capture(review, QString("small-%1").arg(stage));
+        }
+        review.resize(1450, 900);
+        auto systemPalette = app.palette();
+        QPalette dark;
+        dark.setColor(QPalette::Window, QColor("#252a32"));
+        dark.setColor(QPalette::WindowText, QColor("#edf0f5"));
+        dark.setColor(QPalette::Base, QColor("#1d2229"));
+        dark.setColor(QPalette::AlternateBase, QColor("#303640"));
+        dark.setColor(QPalette::Text, QColor("#edf0f5"));
+        dark.setColor(QPalette::Button, QColor("#303640"));
+        dark.setColor(QPalette::ButtonText, QColor("#edf0f5"));
+        dark.setColor(QPalette::Highlight, QColor("#376b9e"));
+        dark.setColor(QPalette::HighlightedText, Qt::white);
+        app.setPalette(dark);
+        QTest::qWait(20);
+        check(review.pageTitle.palette().color(QPalette::WindowText) == dark.color(QPalette::WindowText),
+              "system palette changes reach the workspace text");
+        review.navigate(Window::Review);
+        capture(review, "review-dark");
+        app.setPalette(systemPalette);
+        review.navigate(Window::Review);
+        review.raise();
+        review.activateWindow();
+        QTest::qWait(50);
+        QTest::keyClick(&review, Qt::Key_4, Qt::AltModifier);
+        QTest::qWait(20);
+        check(review.pages->currentIndex() == Window::Stack, "keyboard shortcut changes stages");
         review.close();
+        {
+            Window reopened;
+            reopened.open(QString::fromStdString(reviewPath.string()));
+            check(reopened.pages->currentIndex() == Window::Results && reopened.readiness.resultsCurrent,
+                  "reopening a completed project restores results without a schema migration");
+        }
 
         return 0;
     } catch (const std::exception &e) {

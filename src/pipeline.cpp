@@ -558,6 +558,17 @@ std::string safeName(const std::string &name) {
             c = '_';
     return s.isEmpty() ? "channel" : s.toStdString();
 }
+std::string stackKey(const std::vector<const Frame *> &group, const Settings &settings,
+                     const std::string &filter) {
+    auto numerical = settings.toJson();
+    for (const char *key : {"memory", "scratch", "cacheDirectory", "threads"})
+        numerical.remove(key);
+    std::string signature = std::string(algorithm) + json(numerical).toStdString() + filter;
+    for (const auto *f : group)
+        signature += std::to_string(f->id) + f->analysisKey + json(f->transform.toJson()).toStdString() +
+                     json(f->metrics.toJson()).toStdString();
+    return hash(signature);
+}
 // Each completed band is durably saved before its SQLite progress record. A checksum
 // protects checkpoint reuse after crashes or disk corruption. These are private native
 // float32 intermediates; tagged byte order prevents reuse on a different architecture.
@@ -676,11 +687,15 @@ QJsonArray calibrationPlan(const std::vector<Frame> &frames) {
             if (auto it = groups.find(signature); it != groups.end()) {
                 auto row = result[it->second].toObject();
                 row["count"] = row["count"].toInt() + 1;
+                auto members = row["frameIds"].toArray();
+                members.append(qint64(f.id));
+                row["frameIds"] = members;
                 result[it->second] = row;
                 continue;
             }
             groups[signature] = int(result.size());
             QJsonObject row{{"frame", qint64(f.id)},
+                            {"frameIds", QJsonArray{qint64(f.id)}},
                             {"count", 1},
                             {"session", QString::fromStdString(f.session)},
                             {"filter", QString::fromStdString(f.filter)}};
@@ -747,6 +762,138 @@ QJsonArray calibrationPlan(const std::vector<Frame> &frames) {
         }
     return result;
 }
+WorkflowReport workflowReport(const Project &project, const std::vector<Frame> &frames,
+                              const Settings &settings) {
+    WorkflowReport report;
+    report.assignments = calibrationPlan(frames);
+    try {
+        preflight(frames, settings);
+    } catch (const std::exception &e) {
+        report.prepareBlockers.push_back(e.what());
+    }
+    for (const auto &entry : report.assignments) {
+        auto row = entry.toObject();
+        if (row.contains("error"))
+            report.prepareBlockers.push_back(str(row, "error"));
+        for (auto warning : row["warnings"].toArray())
+            report.warnings.push_back(warning.toString().toStdString());
+        if (!settings.allowUncalibrated && row["bias"].toArray().isEmpty() &&
+            row["dark"].toArray().isEmpty() && row["flat"].toArray().isEmpty())
+            report.prepareBlockers.push_back("No calibration assigned. Import calibration frames or "
+                                             "explicitly allow missing calibration.");
+        auto lookup = [&](int64_t id) -> const Frame * {
+            auto found =
+                std::find_if(frames.begin(), frames.end(), [id](const auto &f) { return f.id == id; });
+            return found == frames.end() ? nullptr : &*found;
+        };
+        auto darks = row["dark"].toArray();
+        if (!darks.empty())
+            if (auto dark = lookup(darks[0].toInteger());
+                dark && dark->master && dark->biasSubtracted && row["bias"].toArray().isEmpty())
+                report.prepareBlockers.push_back("Bias-subtracted dark requires a matching bias master.");
+        for (auto id : row["flat"].toArray()) {
+            auto flat = lookup(id.toInteger());
+            if (!flat || flat->master)
+                continue;
+            try {
+                auto darkflat = choose(*flat, frames, "darkflat"), bias = choose(*flat, frames, "bias");
+                if (darkflat.empty() && bias.empty() && !settings.allowUncalibrated)
+                    report.prepareBlockers.push_back("Raw flat has no matching dark-flat or bias. Select its "
+                                                     "flat group to assign a correction.");
+                if (!darkflat.empty() && darkflat.front().master && darkflat.front().biasSubtracted &&
+                    bias.empty())
+                    report.prepareBlockers.push_back("Bias-subtracted dark-flat requires a matching bias.");
+            } catch (const std::exception &e) {
+                report.prepareBlockers.push_back(e.what());
+            }
+        }
+    }
+    report.canPrepare = report.prepareBlockers.empty();
+    report.prepared = preparationReady(frames, settings);
+    report.stackBlockers = report.prepareBlockers;
+    if (!report.prepared)
+        report.stackBlockers.push_back("Prepare frames to create current calibrated images.");
+    auto analysis = project.record("analysis");
+    bool currentAnalysis =
+        analysis["reference"].toInteger() == settings.reference && settings.reference != 0 &&
+        analysis["polynomial"].toBool() == settings.polynomial && str(analysis, "algorithm") == algorithm;
+    report.analyzed = report.prepared && currentAnalysis;
+    if (!currentAnalysis)
+        report.stackBlockers.push_back(
+            "Analyze frames with the current reference and registration settings.");
+    if (settings.reference &&
+        std::none_of(frames.begin(), frames.end(), [&](const auto &f) { return f.id == settings.reference; }))
+        report.stackBlockers.push_back(
+            "The reference frame is missing. Choose a new reference and prepare frames.");
+    auto decisions = evaluateSelection(frames, settings);
+    auto calibration = calibrationSignature(frames, settings.allowUncalibrated);
+    std::map<std::pair<std::string, std::string>, QJsonObject> summaries;
+    std::map<std::string, std::vector<const Frame *>> accepted;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const auto &f = frames[i];
+        report.unknown += f.kind == "unknown" && f.selection >= 0;
+        if (f.kind != "light" || f.master)
+            continue;
+        ++report.lights;
+        if (f.selection >= 0 && f.error.empty() && f.analysisKey != dependencyKey(f, calibration))
+            report.analyzed = false;
+        auto key = std::pair{f.filter, f.session};
+        auto &summary = summaries[key];
+        summary["filter"] = QString::fromStdString(f.filter);
+        summary["night"] = QString::fromStdString(f.session);
+        summary["total"] = summary["total"].toInt() + 1;
+        if (!decisions[i].included) {
+            summary["excluded"] = summary["excluded"].toInt() + 1;
+            continue;
+        }
+        summary["accepted"] = summary["accepted"].toInt() + 1;
+        auto seconds = number(f.descriptor.header, "EXPTIME", number(f.descriptor.header, "EXPOSURE", 0));
+        summary["seconds"] = summary["seconds"].toDouble() + std::max(0.0, seconds);
+        accepted[f.filter].push_back(&f);
+        std::string problem;
+        if (!f.error.empty())
+            problem = f.error;
+        else if (f.calibrationKey != dependencyKey(f, calibration) || f.calibratedPath.empty() ||
+                 !fs::exists(f.calibratedPath))
+            problem = "Needs calibration";
+        else if (!currentAnalysis || f.analysisKey != dependencyKey(f, calibration))
+            problem = "Needs analysis";
+        else if (!f.transform.valid)
+            problem = "Alignment failed";
+        else if (!std::isfinite(f.metrics.transparency) || f.metrics.transparency <= 0)
+            problem = "Needs photometric normalization";
+        if (!problem.empty())
+            report.frameProblems[f.id] = problem;
+    }
+    for (const auto &[key, summary] : summaries)
+        report.groups.append(summary);
+    if (accepted.empty())
+        report.stackBlockers.push_back("No light frames remain after grading.");
+    if (!report.frameProblems.empty())
+        report.stackBlockers.push_back(std::to_string(report.frameProblems.size()) +
+                                       " included frames need preparation, correction, or exclusion.");
+    std::set<std::string> outputNames;
+    for (const auto &[filter, group] : accepted)
+        if (!outputNames.insert(safeName(filter)).second)
+            report.stackBlockers.push_back("Filter names produce the same output filename. Correct their "
+                                           "metadata before stacking.");
+    report.canStack = report.stackBlockers.empty();
+    auto results = project.record("results")["masters"].toArray();
+    auto checkpoint = project.record("checkpoint");
+    report.resultsCurrent = report.canStack && results.size() == qsizetype(accepted.size());
+    for (const auto &[filter, group] : accepted) {
+        auto ordered = group;
+        std::sort(ordered.begin(), ordered.end(), [](auto a, auto b) { return a->id < b->id; });
+        auto result = project.record("result:" + filter);
+        auto currentKey = stackKey(ordered, settings, filter);
+        if (report.canStack && str(checkpoint, "stage") == "stack" && str(checkpoint, "key") == currentKey)
+            report.resumable = true;
+        if (str(result, "key") != currentKey || !fs::exists(fs::path(str(result, "path"))))
+            report.resultsCurrent = false;
+    }
+    return report;
+}
+
 void calibrate(Project &project, const fs::path &directory, const Progress &progress) {
     auto lock = lockProject(project);
     auto settings = project.settings();
@@ -1092,14 +1239,10 @@ void stack(Project &project, const fs::path &output, const Progress &progress) {
         coverage.pixels.assign(master.samples(), 0);
         weights.pixels.assign(master.samples(), 0);
         rejected.pixels.assign(master.samples(), 0);
-        auto numericalSettings = settings.toJson();
-        for (const char *key : {"memory", "scratch", "cacheDirectory", "threads"})
-            numericalSettings.remove(key);
-        std::string signature = std::string(algorithm) + json(numericalSettings).toStdString() + filter;
+        std::vector<const Frame *> keyFrames;
         for (const auto &f : group)
-            signature += std::to_string(f.id) + f.analysisKey + json(f.transform.toJson()).toStdString() +
-                         json(f.metrics.toJson()).toStdString();
-        auto runKey = hash(signature);
+            keyFrames.push_back(&f);
+        auto runKey = stackKey(keyFrames, settings, filter);
         fs::path final = output / (safeName(filter) + "-master" + extension(settings.format));
         auto old = project.record("result:" + filter);
         if (str(old, "key") == runKey && str(old, "path") == fs::absolute(final).string() &&

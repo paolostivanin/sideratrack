@@ -500,28 +500,48 @@ void importFiles(Project &project, const std::vector<fs::path> &roots, const Pro
             progress("import", ++done, paths.size(), path.filename().string());
     }
 }
-std::vector<Frame> selectedLights(const std::vector<Frame> &frames, const Settings &s) {
-    std::map<std::string, std::vector<Frame>> groups;
-    for (const auto &f : frames)
-        if (f.kind == "light" && !f.master && f.selection >= 0) {
-            if (f.selection == 0 &&
-                ((s.maxFwhm > 0 && (!std::isfinite(f.metrics.fwhm) || f.metrics.fwhm > s.maxFwhm)) ||
-                 (s.maxEccentricity > 0 &&
-                  (!std::isfinite(f.metrics.eccentricity) || f.metrics.eccentricity > s.maxEccentricity))))
-                continue;
-            groups[f.filter].push_back(f);
-        }
-    std::vector<Frame> result;
+std::vector<SelectionDecision> evaluateSelection(const std::vector<Frame> &frames, const Settings &s) {
+    std::vector<SelectionDecision> decisions;
+    std::map<std::string, std::vector<size_t>> groups;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const auto &f = frames[i];
+        SelectionDecision decision{f.id, false, "Calibration frame"};
+        if (f.selection < 0)
+            decision.reason = "Manually excluded";
+        else if (f.kind != "light" || f.master)
+            decision.included = true;
+        else if (f.selection == 0 && s.maxFwhm > 0 &&
+                 (!std::isfinite(f.metrics.fwhm) || f.metrics.fwhm > s.maxFwhm))
+            decision.reason = "Excluded by FWHM limit";
+        else if (f.selection == 0 && s.maxEccentricity > 0 &&
+                 (!std::isfinite(f.metrics.eccentricity) || f.metrics.eccentricity > s.maxEccentricity))
+            decision.reason = "Excluded by eccentricity limit";
+        else
+            groups[f.filter].push_back(i);
+        decisions.push_back(std::move(decision));
+    }
     for (auto &[filter, group] : groups) {
-        std::stable_sort(group.begin(), group.end(), [](const Frame &a, const Frame &b) {
-            auto x = a.metrics.fwhm, y = b.metrics.fwhm;
+        std::stable_sort(group.begin(), group.end(), [&](size_t a, size_t b) {
+            auto x = frames[a].metrics.fwhm, y = frames[b].metrics.fwhm;
             return (std::isfinite(x) ? x : INFINITY) < (std::isfinite(y) ? y : INFINITY);
         });
         size_t keep = size_t(std::ceil(group.size() * s.keepPercent / 100));
-        for (size_t i = 0; i < group.size(); ++i)
-            if (i < keep || group[i].selection > 0)
-                result.push_back(std::move(group[i]));
+        for (size_t i = 0; i < group.size(); ++i) {
+            auto &decision = decisions[group[i]];
+            decision.included = i < keep || frames[group[i]].selection > 0;
+            decision.reason = frames[group[i]].selection > 0 ? "Manually included"
+                              : decision.included            ? "Included automatically"
+                                                             : "Excluded by best-FWHM percentage";
+        }
     }
+    return decisions;
+}
+std::vector<Frame> selectedLights(const std::vector<Frame> &frames, const Settings &s) {
+    auto decisions = evaluateSelection(frames, s);
+    std::vector<Frame> result;
+    for (size_t i = 0; i < frames.size(); ++i)
+        if (decisions[i].included && frames[i].kind == "light" && !frames[i].master)
+            result.push_back(frames[i]);
     std::sort(result.begin(), result.end(), [](const Frame &a, const Frame &b) { return a.id < b.id; });
     return result;
 }

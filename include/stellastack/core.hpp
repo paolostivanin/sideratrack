@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -143,6 +144,23 @@ Transform registerStars(const std::vector<Star> &source, const std::vector<Star>
 Image debayer(const Image &);
 float interpolate(const Image &, int channel, double x, double y);
 std::vector<Frame> selectedLights(const std::vector<Frame> &, const Settings &);
+struct SelectionDecision {
+    int64_t id = 0;
+    bool included = false;
+    std::string reason;
+};
+// One decision per input, in input order. Does not copy image/star data.
+std::vector<SelectionDecision> evaluateSelection(const std::vector<Frame> &, const Settings &);
+struct WorkflowReport {
+    bool canPrepare = false, prepared = false, analyzed = false, canStack = false, resultsCurrent = false,
+         resumable = false;
+    int lights = 0, unknown = 0;
+    std::vector<std::string> prepareBlockers, stackBlockers, warnings;
+    std::map<int64_t, std::string> frameProblems;
+    QJsonArray groups, assignments;
+};
+// Metadata-only advisory report. Workers still verify fingerprints and outputs.
+WorkflowReport workflowReport(const Project &, const std::vector<Frame> &, const Settings &);
 QJsonArray calibrationPlan(const std::vector<Frame> &);
 std::string calibrationRevision(const std::vector<Frame> &, const Settings &);
 bool preparationReady(const std::vector<Frame> &, const Settings &);

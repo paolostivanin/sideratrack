@@ -1,0 +1,127 @@
+#pragma once
+#include "widgets.hpp"
+#include <QProcess>
+#include <memory>
+
+namespace ss::gui {
+class Window : public QMainWindow {
+  public:
+    std::unique_ptr<ss::Project> project;
+    FrameModel model;
+    FrameProxy proxy, importProxy;
+    QTableView table;
+    QTableView importTable;
+    ImageView view;
+    MetricPlot plot{&model};
+    QProcess worker;
+    QByteArray output;
+    QProgressBar progress;
+    QLabel status, previewStatus;
+    QPlainTextEdit log;
+    QComboBox filter, metric;
+    QTimer blink, updateTimer;
+    QSet<qlonglong> changedFrameIds;
+    QCache<QString, CachedPreview> previewCache;
+    QSet<QString> failedPreviewKeys;
+    QString previewCalibration;
+    QPushButton *blinkButton = nullptr;
+    QDoubleSpinBox blinkInterval;
+    std::vector<int64_t> blinkIds;
+    size_t blinkCursor = 0;
+    bool pendingIsPrefetch = false;
+    int64_t displayedFrame = 0;
+    QAction *analyzeAction = nullptr;
+    size_t previewRenders = 0;
+    QThread *previewThread = nullptr;
+    int64_t pendingPreview = 0;
+    uint64_t previewGeneration = 0;
+    double black = NAN, white = NAN;
+    bool commonStretch = true;
+    QString lastOutput;
+    QList<QAction *> jobActions;
+    enum Stage { Import, Calibration, Review, Stack, Results };
+    enum SettingsSection { Resources, Registration, Grading, Integration };
+    QSettings preferences;
+    QStackedWidget *pages = nullptr, *welcomeOrProject = nullptr;
+    QListWidget navigation, recentProjects, resultList;
+    QLabel projectName, pageTitle, pageDescription, pageHint, importSummary, calibrationHint,
+        preflightSummary, selectionSummary, frameDetails, resultDetails, jobTitle, jobDetail;
+    ImageView resultView;
+    QTableWidget assignments, stackGroups;
+    QLineEdit preparedDirectory, stackDirectory, exportDirectory, search;
+    QComboBox typeFilter, nightFilter, stateFilter, stackFormat, exportFormat;
+    QPushButton primary, cancelJob, recoverJob, viewCompletion, applyAssignment, masterButton,
+        importMasterButton;
+    QToolButton detailsToggle, logsToggle;
+    QWidget *projectWorkspace = nullptr, *jobPanel = nullptr, *inspector = nullptr;
+    ImportDropArea *dropArea = nullptr;
+    std::array<QComboBox, 4> calibrationChoices;
+    std::array<QLabel, 4> calibrationDescriptions;
+    QSplitter *reviewSplit = nullptr;
+    ss::WorkflowReport readiness;
+    QJsonArray calibrationGroups, products;
+    QList<QWidget *> editableWidgets;
+    QAction *newAction = nullptr, *openAction = nullptr, *calibrateAction = nullptr;
+    QElapsedTimer jobElapsed;
+    qint64 preparationElapsed = 0;
+    QTimer elapsedTimer;
+    QString jobCommand, lastCommand, jobMessage;
+    QStringList lastArguments;
+    bool preparationSequence = false, cancellationRequested = false, workerHadError = false;
+    int jobOrigin = Import, completionStage = -1;
+    QThread *resultThread = nullptr;
+    uint64_t resultGeneration = 0;
+    QString workerBinary;
+    void buildUi();
+    QWidget *buildWelcome();
+    QWidget *buildImport();
+    QWidget *buildCalibration();
+    QWidget *buildReview();
+    QWidget *buildStack();
+    QWidget *buildResults();
+    void navigate(Stage stage);
+    void runPrimary();
+    void createProject();
+    void chooseProject();
+    void chooseImport(bool folder);
+    void updateRecentProjects(const QString &path = {});
+    void updateFilters();
+    void refreshPages();
+    void refreshCalibration();
+    void updateCalibrationGroup();
+    void applyCalibrationGroup();
+    void createMasters();
+    void prepare();
+    void cancelProcessing();
+    void finishJob(int code, QProcess::ExitStatus exit);
+    void refreshResults();
+    void showResult();
+    void exportResults();
+    void showDetails();
+    QTableView &activeTable();
+    void saveUiState();
+    Window();
+    ~Window() override;
+    void error(const QString &message);
+    void setBusy(bool busy);
+    void open(const QString &path);
+    void reload();
+    void readWorkerOutput();
+    void updateReadiness();
+    void updateFrames();
+    std::vector<ss::Star> displayStars(const ss::Frame &frame, const QImage &image);
+    void presentPreview(const ss::Frame &frame, const CachedPreview &preview);
+    void prefetchNext();
+    void summary();
+    void start(const QString &command, QStringList extra = {});
+    std::vector<size_t> selectedRows();
+    void select(int selection);
+    void editSelected();
+    void showCurrent();
+    void loadPreview();
+    void settings(SettingsSection section = Resources);
+    void calibration();
+    void closeEvent(QCloseEvent *event) override;
+    bool event(QEvent *event) override;
+};
+} // namespace ss::gui

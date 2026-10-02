@@ -3,12 +3,13 @@
 Linux astrophotography stacking, from camera exposures to linear masters.
 
 Stellastack provides a Qt 6 desktop application and a command-line interface for
-**Import → Calibrate → Analyze → Review → Stack → Export**. Each project covers one target,
+**Import → Calibration → Review → Stack → Results**. Each project covers one target,
 camera and optical setup, with exposures from one or more nights.
 
-**Project status:** version 0.2.0 is an initial implementation for manual
-validation. Native Wayland/manual GUI validation and comparison with Siril
-remain to be completed. See [validation results](docs/VALIDATION.md).
+**Project status:** **0.99.1-alpha.1 (Alpha 1)** is available for manual
+validation. Automated GUI checks pass on Wayland and X11; manual real-data
+usability validation and comparison with Siril remain to be completed.
+See [validation results](docs/VALIDATION.md).
 
 ## What it does
 
@@ -59,27 +60,38 @@ each other.
 
 ## Your first desktop stack
 
-1. Create a project and import your lights and calibration files. Check frame
-   type, filter, night and camera metadata; correct them in the frame table or
-   with **Edit selected**.
-2. Open **Calibration assignments**, review automatic assignments and resolve ambiguous
-   matches. Mark imported calibration masters correctly.
-3. Run **Calibrate** to save prepared lights, then **Analyze**. Review star measurements and previews, and blink frames to
-   identify problems. Preview stretching does not change image data.
-4. Exclude unwanted frames, or configure quality limits in **Settings & grading**.
-   Fix or exclude unreadable and unregistered frames before stacking. Processing
-   without required calibration needs an explicit setting.
-5. Run **Stack** into a new output directory, then **Export** the completed
-   masters in your preferred format. Continue finishing in your image editor.
+1. Create a project from the welcome screen. In **Import**, add files, add a
+   folder recursively, or drop exposures onto the page. Check frame types,
+   filters and nights; use **Edit metadata** for acquisition corrections.
+2. In **Calibration**, select an acquisition group and review its automatic
+   assignments. Resolve ambiguous matches directly on the page. Mark imported
+   masters and their bias-removal state correctly in the import table.
+3. Click **Prepare frames** to calibrate, analyze and align your lights. The app
+   opens **Review** when preparation finishes; separate commands remain in
+   the **Advanced** menu.
+4. Inspect previews and quality plots, blink selected exposures, and exclude
+   unwanted frames. **Grading rules** previews automatic inclusion counts before
+   saving. Frame statuses explain exclusions and processing problems.
+5. In **Stack**, review counts, exposure time, calibration assignments and output
+   settings. Choose a new master directory and click **Stack frames**.
+6. In **Results**, inspect your linear masters and export them in the desired
+   format. Continue color composition and finishing in your image editor.
 
-For calibration matching rules, reusable master creation, grading and stacking
-options, see the [desktop workflow guide](docs/WORKFLOW.md).
+The sidebar shows each stage's state and the next action. Resource preferences,
+registration/calibration, grading and integration settings are grouped separately.
+Recent projects, window geometry and review layout are saved as UI preferences;
+existing project files require no migration. Use **Alt+1** through **Alt+5** to
+navigate stages, **Ctrl+N** to create a project, **Ctrl+O** to open one, and
+**Ctrl+I** to add files.
 
-**Cancellation and recovery:** after cancelled calibration, run **Calibrate** again;
-after cancelled analysis, run **Analyze** again.
-After cancelled integration, use **Resume** with the same output directory.
-Completed stages are saved and verified before reuse; existing unrelated outputs
-are never silently overwritten.
+For matching rules, reusable masters, grading and recovery, see the
+[desktop workflow guide](docs/WORKFLOW.md).
+
+**Cancellation and recovery:** the processing panel offers **Retry preparation**
+or **Resume stack**. Preparation reuses completed calibrated images; analysis
+starts only after calibration succeeds. Compatible saved stack checkpoints are
+also offered when reopening a project. Inputs and outputs are verified before
+reuse; unrelated outputs are never silently overwritten.
 
 ## CLI quick start
 
