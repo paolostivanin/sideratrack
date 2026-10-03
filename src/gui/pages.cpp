@@ -323,11 +323,11 @@ QWidget *Window::buildImport() {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(16);
+    layout->setSpacing(12);
     dropArea = new ImportDropArea;
     dropArea->setObjectName("dropArea");
     auto *drop = new QHBoxLayout(dropArea);
-    drop->setContentsMargins(20, 18, 20, 18);
+    drop->setContentsMargins(20, 12, 20, 12);
     auto *copy = new QVBoxLayout;
     copy->addWidget(label("Drop your exposures here", 13, true));
     copy->addWidget(
@@ -346,26 +346,218 @@ QWidget *Window::buildImport() {
     layout->addWidget(dropArea);
     importSummary.setWordWrap(true);
     importSummary.setTextFormat(Qt::PlainText);
-    layout->addWidget(&importSummary);
+    auto *overviewHeading = new QHBoxLayout;
+    overviewHeading->addWidget(&importSummary, 1);
+    allImportNights.setText("All nights");
+    allImportNights.setEnabled(false);
+    allImportNights.setToolTip("Show all imported frames and clear the night filter.");
+    overviewHeading->addWidget(&allImportNights);
+    layout->addLayout(overviewHeading);
+    importNights.setObjectName("importNights");
+    importNights.setColumnCount(6);
+    importNights.setHorizontalHeaderLabels(
+        {"Night", "Frames", "Types", "Filters", "Capture range (UTC)", "Source folders"});
+    importNights.horizontalHeaderItem(0)->setToolTip(
+        "Imported nights use the calendar date from DATE-OBS, or the source folder when it is missing. "
+        "A session crossing midnight can have two assignments. Select its frames and use Edit metadata "
+        "to correct the night.");
+    importNights.setSelectionBehavior(QAbstractItemView::SelectRows);
+    importNights.setSelectionMode(QAbstractItemView::SingleSelection);
+    importNights.setEditTriggers(QAbstractItemView::NoEditTriggers);
+    importNights.setAlternatingRowColors(true);
+    importNights.setShowGrid(false);
+    importNights.setWordWrap(false);
+    importNights.verticalHeader()->hide();
+    importNights.verticalHeader()->setDefaultSectionSize(30);
+    importNights.horizontalHeader()->setStretchLastSection(true);
+    const std::array<int, 6> nightWidths{130, 65, 210, 90, 345, 160};
+    for (int column = 0; column < int(nightWidths.size()); ++column)
+        importNights.setColumnWidth(column, nightWidths[size_t(column)]);
+    importNights.setMinimumHeight(62);
+    importNights.setMaximumHeight(200);
     importProxy.setSourceModel(&model);
     importTable.setModel(&importProxy);
     setupTable(importTable);
     for (int i = 0; i < columns.size(); ++i)
         importTable.setColumnHidden(i, !QList<int>{0, 2, 3, 4, 5, 6, 7, 16}.contains(i));
     importTable.horizontalHeader()->setStretchLastSection(true);
-    layout->addWidget(&importTable, 1);
+    auto *datasets = new QSplitter(Qt::Vertical);
+    datasets->addWidget(&importNights);
+    datasets->addWidget(&importTable);
+    datasets->setChildrenCollapsible(false);
+    datasets->setStretchFactor(0, 1);
+    datasets->setStretchFactor(1, 3);
+    datasets->setSizes({120, 360});
+    layout->addWidget(datasets, 1);
+    connect(&allImportNights, &QPushButton::clicked, this, [this] { setImportNight(); });
+    connect(&importNights, &QTableWidget::currentCellChanged, this, [this](int row, int, int previousRow) {
+        if (row >= 0 && row != previousRow)
+            setImportNight(importNights.item(row, 0)->data(Qt::UserRole).toString());
+    });
+    connect(importTable.selectionModel(), &QItemSelectionModel::selectionChanged, this,
+            [this] { updateImportSelection(); });
     auto *row = new QHBoxLayout;
     auto *edit = new QPushButton("Edit metadata…");
     auto *exclude = new QPushButton("Exclude selected");
     editableWidgets << edit << exclude;
     connect(edit, &QPushButton::clicked, this, [this] { editSelected(); });
     connect(exclude, &QPushButton::clicked, this, [this] { select(-1); });
+    selectShown.setText("Select shown");
+    selectShown.setEnabled(false);
+    selectShown.setToolTip("Select all visible frames, then use Edit metadata to correct their night.");
+    connect(&selectShown, &QPushButton::clicked, &importTable, &QTableView::selectAll);
+    row->addWidget(&selectShown);
     row->addWidget(edit);
     row->addWidget(exclude);
     row->addStretch();
-    row->addWidget(label("Double-click Type, Filter, or Night to correct a value."));
+    importSelectionSummary.setWordWrap(true);
+    importSelectionSummary.setTextFormat(Qt::PlainText);
+    importSelectionSummary.setToolTip("Double-click Type, Filter, or Night to correct a value.");
+    row->addWidget(&importSelectionSummary);
     layout->addLayout(row);
     return page;
+}
+
+void Window::setImportNight(const std::optional<QString> &night) {
+    importTable.clearSelection();
+    importTable.setCurrentIndex({});
+    importProxy.night = night.value_or(QString());
+    importProxy.exactNight = night.has_value();
+    importProxy.refresh();
+    QSignalBlocker blocker(importNights);
+    importNights.clearSelection();
+    importNights.setCurrentIndex({});
+    if (night)
+        for (int row = 0; row < importNights.rowCount(); ++row)
+            if (importNights.item(row, 0)->data(Qt::UserRole).toString() == *night) {
+                importNights.setCurrentCell(row, 0);
+                importNights.selectRow(row);
+                break;
+            }
+    updateImportSelection();
+}
+
+void Window::updateImportSelection() {
+    allImportNights.setEnabled(importProxy.exactNight);
+    selectShown.setEnabled(importProxy.rowCount() > 0);
+    importSelectionSummary.setText(QString("%1 visible · %2 selected")
+                                       .arg(importProxy.rowCount())
+                                       .arg(importTable.selectionModel()->selectedRows().size()));
+}
+
+void Window::refreshImportNights() {
+    struct Night {
+        int count = 0, missingTimes = 0, invalidTimes = 0;
+        QMap<QString, int> types, masters;
+        QSet<QString> filters, folders;
+        QDateTime first, last;
+    };
+    QMap<QString, Night> nights;
+    // Append UTC before parsing an unzoned timestamp so the desktop timezone,
+    // including its daylight-saving transitions, cannot affect the capture range.
+    static const QRegularExpression zone("(?:Z|[+-][0-9]{2}(?::?[0-9]{2})?)$");
+    for (const auto &frame : model.frames) {
+        auto &night = nights[q(frame.session)];
+        ++night.count;
+        ++night.types[q(frame.kind)];
+        if (frame.master)
+            ++night.masters[q(frame.kind)];
+        night.filters.insert(frame.filter.empty() ? "Unassigned" : q(frame.filter));
+        night.folders.insert(q(frame.path.parent_path().string()));
+        const auto observed = frame.descriptor.header["DATE-OBS"];
+        auto text = observed.toString().trimmed();
+        if (observed.isUndefined() || observed.isNull() || (observed.isString() && text.isEmpty())) {
+            ++night.missingTimes;
+            continue;
+        }
+        QDateTime time;
+        if (text.size() > 10 && (text[10] == 'T' || text[10] == ' ')) {
+            if (!zone.match(text).hasMatch())
+                text += 'Z';
+            time = QDateTime::fromString(text, Qt::ISODateWithMs).toUTC();
+        }
+        if (!time.isValid()) {
+            ++night.invalidTimes;
+            continue;
+        }
+        if (!night.first.isValid() || time < night.first)
+            night.first = time;
+        if (!night.last.isValid() || time > night.last)
+            night.last = time;
+    }
+    QSignalBlocker blocker(importNights);
+    const auto scroll = importNights.verticalScrollBar()->value();
+    importNights.setRowCount(nights.size());
+    int row = 0, selected = -1;
+    for (auto it = nights.cbegin(); it != nights.cend(); ++it, ++row) {
+        const auto &night = it.value();
+        QStringList types;
+        for (auto type = night.types.cbegin(); type != night.types.cend(); ++type) {
+            auto text =
+                QString("%1 %2").arg(type.value()).arg(type.key() == "darkflat" ? "dark-flat" : type.key());
+            if (night.masters.value(type.key()))
+                text += QString(" (%1 %2)")
+                            .arg(night.masters.value(type.key()))
+                            .arg(night.masters.value(type.key()) == 1 ? "master" : "masters");
+            types << text;
+        }
+        auto filters = night.filters.values();
+        filters.sort();
+        auto folders = night.folders.values();
+        folders.sort();
+        QSet<QString> names;
+        for (const auto &folder : folders) {
+            const auto name = QFileInfo(folder).fileName();
+            names.insert(name.isEmpty() ? folder : name);
+        }
+        auto sortedNames = names.values();
+        sortedNames.sort();
+        auto folderText = sortedNames.join(", ");
+        if (folders.size() > 1)
+            folderText += QString(" (%1 folders)").arg(folders.size());
+        QString range = "No valid capture times";
+        QString timeDetails;
+        if (night.first.isValid()) {
+            range = night.first.toString("yyyy-MM-dd HH:mm:ss");
+            if (night.first != night.last)
+                range += " – " + night.last.toString("yyyy-MM-dd HH:mm:ss");
+            timeDetails = night.first.toString(Qt::ISODateWithMs) + " – " +
+                          night.last.toString(Qt::ISODateWithMs) + "\n";
+        }
+        QStringList cells{it.key().isEmpty() ? "Unassigned" : it.key(),
+                          QString::number(night.count),
+                          types.join(" · "),
+                          filters.join(", "),
+                          range,
+                          folderText};
+        for (int column = 0; column < cells.size(); ++column) {
+            auto *item = new QTableWidgetItem(cells[column]);
+            item->setToolTip(cells[column]);
+            importNights.setItem(row, column, item);
+        }
+        importNights.item(row, 0)->setData(Qt::UserRole, it.key());
+        importNights.item(row, 4)->setToolTip(
+            timeDetails + QString("%1 valid capture times · %2 missing · %3 invalid\n"
+                                  "DATE-OBS times are displayed in UTC; times without an offset use UTC.")
+                              .arg(night.count - night.missingTimes - night.invalidTimes)
+                              .arg(night.missingTimes)
+                              .arg(night.invalidTimes));
+        importNights.item(row, 5)->setToolTip(folders.join("\n"));
+        if (importProxy.exactNight && importProxy.night == it.key())
+            selected = row;
+    }
+    if (selected >= 0) {
+        importNights.setCurrentCell(selected, 0);
+        importNights.selectRow(selected);
+    } else {
+        importNights.clearSelection();
+        importNights.setCurrentIndex({});
+    }
+    importNights.verticalScrollBar()->setValue(scroll);
+    if (importProxy.exactNight && selected < 0)
+        setImportNight();
+    else
+        updateImportSelection();
 }
 
 QWidget *Window::buildCalibration() {

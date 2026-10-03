@@ -162,6 +162,7 @@ void Window::open(const QString &path) {
         blinkButton->setChecked(false);
         table.clearSelection();
         importTable.clearSelection();
+        setImportNight();
         changedFrameIds.clear();
         updateTimer.stop();
         previewCache.clear();
@@ -224,6 +225,8 @@ void Window::open(const QString &path) {
 void Window::reload() {
     try {
         QList<qlonglong> reviewIds, importIds;
+        const auto importNight = importProxy.night;
+        const bool exactImportNight = importProxy.exactNight;
         for (auto index : table.selectionModel()->selectedRows())
             reviewIds << model.frames[size_t(proxy.mapToSource(index).row())].id;
         for (auto index : importTable.selectionModel()->selectedRows())
@@ -250,7 +253,8 @@ void Window::reload() {
             }
         };
         restore(table, proxy, reviewIds);
-        restore(importTable, importProxy, importIds);
+        if (importNight == importProxy.night && exactImportNight == importProxy.exactNight)
+            restore(importTable, importProxy, importIds);
         plot.update();
         summary();
         showDetails();
@@ -371,6 +375,7 @@ void Window::updateReadiness() {
                                  .arg(double(settings.scratch) / ss::GiB, 0, 'f', 1)
                                  .arg(settings.threads));
     refreshPages();
+    refreshImportNights();
     summary();
     showDetails();
 }
@@ -563,6 +568,7 @@ void Window::editSelected() {
     QComboBox kind;
     kind.addItems({"Keep current type", "light", "dark", "flat", "bias", "darkflat", "unknown"});
     QLineEdit band, night, camera, exposure, temperature, gain, offset, xbin, ybin, sampleScale;
+    night.setObjectName("metadataNight");
     QComboBox cfa, rowOrder;
     cfa.addItems({"Keep current", "Mono / RGB", "RGGB", "BGGR", "GRBG", "GBRG"});
     rowOrder.addItems({"Keep current", "TOP-DOWN", "BOTTOM-UP"});

@@ -62,7 +62,9 @@ each other.
 
 1. Create a project from the welcome screen. In **Import**, add files, add a
    folder recursively, or drop exposures onto the page. Check frame types,
-   filters and nights; use **Edit metadata** for acquisition corrections.
+   filters and nights. Select a row in the night overview to inspect its frames,
+   capture times and source folders. Use **Select shown** and **Edit metadata**
+   to correct a night's assignment in bulk; **All nights** restores the full list.
 2. In **Calibration**, select an acquisition group and review its automatic
    assignments. Resolve ambiguous matches directly on the page. Mark imported
    masters and their bias-removal state correctly in the import table.

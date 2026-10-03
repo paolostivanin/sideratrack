@@ -8,6 +8,18 @@
    Double-click type/filter/night to correct them, or use **Edit metadata** for
    bulk acquisition metadata corrections. Mark imported calibration masters and
    indicate whether a dark master already has its bias removed.
+   The night overview counts every imported frame, including excluded frames,
+   unknown types and calibration masters. Select a night to filter the frame
+   table, then use **Select shown** and **Edit metadata** to correct its assignment
+   in bulk. Switching nights clears the frame selection; **All nights** restores
+   the full list. Empty assignments appear as **Unassigned**.
+   Capture ranges use valid `DATE-OBS` timestamps displayed in UTC; explicit
+   offsets are honored and timestamps without an offset use UTC. Hover over a
+   range for missing/invalid timestamp counts, or source folders for their full
+   paths. Imported nights still use the calendar date from `DATE-OBS`, or the
+   first ten characters of the source folder's name when the timestamp is absent.
+   An observing session crossing midnight can therefore have two assignments;
+   correct these manually when they belong to the same night.
 2. Open **Calibration** and select an acquisition group to review its assignments.
    Automatic matching checks camera,
    dimensions, CFA, binning, gain/offset, readout mode, exposure, temperature and

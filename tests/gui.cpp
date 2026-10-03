@@ -10,6 +10,22 @@ void check(bool ok, const char *message) {
     if (!ok)
         throw ss::Error(message);
 }
+void editNight(Window &window, const QString &value) {
+    check(!window.model.busy && !window.selectedRows().empty(), "night correction has an editable selection");
+    bool edited = false;
+    QTimer::singleShot(0, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        auto *night = dialog ? dialog->findChild<QLineEdit *>("metadataNight") : nullptr;
+        if (night) {
+            night->setText(value);
+            edited = true;
+            dialog->accept();
+        } else if (dialog)
+            dialog->reject();
+    });
+    window.editSelected();
+    check(edited, "night correction uses the metadata dialog");
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Stellastack-tests");
@@ -91,6 +107,156 @@ int main(int argc, char **argv) {
             return 0;
         }
         const auto root = ss::fs::path(temp.path().toStdString());
+        {
+            const auto nightPath = root / "nights.stella";
+            ss::Project project(nightPath, true);
+            auto add = [&](const char *file, const char *kind, const char *band, const char *night,
+                           const QJsonValue &time = QJsonValue(), bool master = false, bool excluded = false,
+                           bool otherFolder = false) {
+                ss::Frame frame;
+                frame.path = root / (otherFolder ? "second" : "first") / "shared" / file;
+                frame.kind = kind;
+                frame.filter = band;
+                frame.session = night;
+                frame.master = master;
+                frame.selection = excluded ? -1 : 0;
+                frame.descriptor.width = frame.descriptor.height = 32;
+                frame.descriptor.header["EXPTIME"] = 60;
+                if (!time.isNull())
+                    frame.descriptor.header["DATE-OBS"] = time;
+                project.save(frame);
+                return frame.id;
+            };
+            const auto light = add("light.fits", "light", "L", "2026-09-20", "2026-09-20T22:00:00.125+02:00");
+            add("excluded.fits", "light", "Ha", "2026-09-20", "2026-09-21T00:30:00.250", false, true);
+            add("bias.fits", "bias", "", "2026-09-20", QJsonValue(), true, false, true);
+            add("flat.fits", "flat", "L", "2026-09-20", "not-a-date");
+            add("dark.fits", "dark", "L", "2026-09-20", "2026-09-20");
+            add("dark-flat.fits", "darkflat", "L", "2026-09-20", 123);
+            const auto nextLight = add("next-night.fits", "light", "L", "2026-09-21", "2026-09-21T23:00:00Z");
+            add("unassigned.fits", "unknown", "", "", "2026-09-22T01:00:00");
+            Window nights;
+            nights.open(QString::fromStdString(nightPath.string()));
+            nights.navigate(Window::Import);
+            nights.show();
+            auto rowFor = [&](const QString &night) {
+                for (int row = 0; row < nights.importNights.rowCount(); ++row)
+                    if (nights.importNights.item(row, 0)->data(Qt::UserRole).toString() == night)
+                        return row;
+                return -1;
+            };
+            check(nights.importNights.rowCount() == 3 && nights.importProxy.rowCount() == 8,
+                  "night overview includes all assignments");
+            auto row = rowFor("2026-09-20");
+            check(row >= 0 && nights.importNights.item(row, 1)->text() == "6",
+                  "night counts include excluded frames and masters");
+            const auto types = nights.importNights.item(row, 2)->text();
+            check(types.contains("2 light") && types.contains("1 bias (1 master)") &&
+                      types.contains("1 flat") && types.contains("1 dark") && types.contains("1 dark-flat"),
+                  "night overview distinguishes frame types and masters");
+            check(nights.importNights.item(row, 3)->text() == "Ha, L, Unassigned",
+                  "night overview lists filters");
+            check(nights.importNights.item(row, 4)->text() == "2026-09-20 20:00:00 – 2026-09-21 00:30:00",
+                  "capture range honors offsets and unzoned UTC times across midnight");
+            const auto timeDetails = nights.importNights.item(row, 4)->toolTip();
+            check(timeDetails.contains("2 valid capture times · 1 missing · 3 invalid") &&
+                      timeDetails.contains("20:00:00.125Z") && timeDetails.contains("00:30:00.250Z"),
+                  "capture range reports invalid or missing times and retains precision");
+            check(nights.importNights.item(row, 5)->text() == "shared (2 folders)" &&
+                      nights.importNights.item(row, 5)->toolTip().contains("/first/shared") &&
+                      nights.importNights.item(row, 5)->toolTip().contains("/second/shared"),
+                  "same-name source folders retain distinct full paths");
+            const auto dated = *nights.project->frame(nextLight);
+            auto undated = dated;
+            undated.descriptor.header.remove("DATE-OBS");
+            nights.project->save(undated);
+            nights.reload();
+            check(nights.importNights.item(rowFor("2026-09-21"), 4)->text() == "No valid capture times" &&
+                      nights.importNights.item(rowFor("2026-09-21"), 4)->toolTip().contains("1 missing"),
+                  "an undated night reports missing times without inventing a range");
+            undated = dated;
+            nights.project->save(undated);
+            nights.reload();
+            nights.filter.setCurrentIndex(nights.filter.findData("L"));
+            nights.nightFilter.setCurrentIndex(nights.nightFilter.findData("2026-09-21"));
+            const auto reviewCount = nights.proxy.rowCount();
+            nights.importTable.sortByColumn(2, Qt::DescendingOrder);
+            nights.importNights.setCurrentCell(row, 0);
+            check(nights.importProxy.rowCount() == 6 && nights.proxy.rowCount() == reviewCount &&
+                      nights.proxy.night == "2026-09-21",
+                  "night inspection filters Import independently of Review");
+            nights.selectShown.click();
+            check(nights.selectedRows().size() == 6, "Select shown selects every visible frame");
+            nights.importNights.setCurrentCell(row, 5);
+            check(nights.selectedRows().size() == 6,
+                  "inspecting another column in the same night preserves frame selection");
+            nights.importNights.setCurrentCell(rowFor(""), 0);
+            check(nights.importProxy.exactNight && nights.importProxy.night.isEmpty() &&
+                      nights.importProxy.rowCount() == 1 && nights.selectedRows().empty(),
+                  "Unassigned filters exactly and switching nights clears selection");
+            nights.selectShown.click();
+            check(nights.selectedRows().size() == 1, "Unassigned frames can be selected for correction");
+            nights.allImportNights.click();
+            check(!nights.importProxy.exactNight && nights.importProxy.rowCount() == 8 &&
+                      nights.selectedRows().empty(),
+                  "All nights restores the list and clears selection");
+            nights.importNights.setCurrentCell(rowFor("2026-09-20"), 0);
+            nights.setBusy(true);
+            nights.selectShown.click();
+            check(nights.selectedRows().size() == 6 &&
+                      !nights.model.setData(nights.model.index(0, 5), "changed", Qt::EditRole),
+                  "night inspection remains available while metadata edits are disabled");
+            nights.allImportNights.click();
+            nights.setBusy(false);
+            nights.importNights.setCurrentCell(rowFor("2026-09-20"), 0);
+            nights.reload();
+            check(nights.importProxy.exactNight && nights.importProxy.rowCount() == 6,
+                  "project reload retains the selected night");
+            const auto index =
+                nights.importProxy.mapFromSource(nights.model.index(nights.model.rowsById.value(light), 0));
+            nights.importTable.selectionModel()->select(index, QItemSelectionModel::ClearAndSelect |
+                                                                   QItemSelectionModel::Rows);
+            const auto settings = nights.project->settings().toJson();
+            editNight(nights, "2026-09-21");
+            check(nights.project->frame(light)->session == "2026-09-21" &&
+                      nights.importProxy.night == "2026-09-20" && nights.importProxy.rowCount() == 5 &&
+                      nights.selectedRows().empty(),
+                  "single correction preserves a remaining night and removes its moved selection");
+            nights.selectShown.click();
+            std::vector<int64_t> corrected;
+            for (auto index : nights.selectedRows())
+                corrected.push_back(nights.model.frames[index].id);
+            editNight(nights, "2026-09-19");
+            for (auto id : corrected)
+                check(nights.project->frame(id)->session == "2026-09-19",
+                      "bulk night correction persists every selected identity");
+            check(!nights.importProxy.exactNight && nights.importProxy.rowCount() == 8 &&
+                      nights.selectedRows().empty() && rowFor("2026-09-20") < 0 &&
+                      nights.importNights.item(rowFor("2026-09-19"), 1)->text() == "5" &&
+                      nights.project->frame(light)->session == "2026-09-21" &&
+                      nights.project->settings().toJson() == settings,
+                  "bulk correction updates groups and safely resets a disappearing night");
+            capture(nights, "import-nights");
+            nights.hide();
+            nights.resize(900, 600);
+            nights.show();
+            QTest::qWait(100);
+            check(nights.size() == QSize(900, 600) && nights.importNights.height() >= 62 &&
+                      nights.importTable.height() >= nights.importTable.minimumSizeHint().height(),
+                  "night overview and frames fit the minimum window size");
+            capture(nights, "import-nights-small");
+            nights.importNights.setCurrentCell(rowFor("2026-09-19"), 0);
+            nights.open(QString::fromStdString(nightPath.string()));
+            check(!nights.importProxy.exactNight && nights.importProxy.rowCount() == 8,
+                  "opening a project resets the night filter");
+            const auto emptyPath = root / "empty.stella";
+            ss::Project empty(emptyPath, true);
+            nights.importNights.setCurrentCell(rowFor("2026-09-19"), 0);
+            nights.open(QString::fromStdString(emptyPath.string()));
+            check(nights.importNights.rowCount() == 0 && nights.importProxy.rowCount() == 0 &&
+                      !nights.selectShown.isEnabled() && !nights.allImportNights.isEnabled(),
+                  "opening an empty project clears the previous overview and filter");
+        }
         const auto projectPath = root / "scale.stella";
         {
             ss::Project project(projectPath, true);
@@ -120,6 +286,8 @@ int main(int argc, char **argv) {
         window.navigate(Window::Review);
         QTest::qWait(100);
         check(window.model.rowCount() == 10000, "10,000 frame model");
+        check(window.importNights.rowCount() == 4 && window.importNights.item(0, 1)->text() == "2500",
+              "10,000 frame night overview");
         check(elapsed.elapsed() < 10000, "10,000 frame open time exceeds ten seconds");
         std::cout << "10,000 frame open/paint: " << elapsed.elapsed() << " ms\n";
         window.proxy.sort(9, Qt::AscendingOrder);
@@ -160,6 +328,10 @@ int main(int argc, char **argv) {
             QTest::qWait(20);
         check(!window.model.busy && window.worker.exitCode() == 0, "supervised CLI import");
         check(window.model.rowCount() == 10001, "progressive import updates model");
+        int overviewFrames = 0;
+        for (int row = 0; row < window.importNights.rowCount(); ++row)
+            overviewFrames += window.importNights.item(row, 1)->text().toInt();
+        check(overviewFrames == 10001, "night overview refreshes after supervised imports");
         check(ticks > 0, "GUI event loop remains responsive");
         std::cout << "10,001 frame worker refresh: " << elapsed.elapsed() << " ms; " << ticks
                   << " UI ticks\n";
@@ -323,6 +495,21 @@ int main(int argc, char **argv) {
         check(!review.preparationSequence && review.pages->currentIndex() == Window::Review,
               "Prepare frames chains calibration and analysis then opens Review");
         check(review.readiness.canStack, "current prepared exposures are ready for stacking");
+        review.navigate(Window::Import);
+        review.importNights.setCurrentCell(0, 0);
+        review.selectShown.click();
+        std::vector<ss::Frame> beforeNightEdit;
+        for (auto row : review.selectedRows())
+            beforeNightEdit.push_back(review.model.frames[row]);
+        editNight(review, "corrected-night");
+        check(!review.readiness.prepared && !review.readiness.canStack,
+              "night corrections refresh calibration readiness and invalidate old preparation");
+        review.project->transaction([&] {
+            for (auto frame : beforeNightEdit)
+                review.project->save(frame);
+        });
+        review.reload();
+        check(review.readiness.canStack, "restoring original nights restores current preparation");
 
         // Assignment edits act on the page's group, independently of the review selection.
         review.navigate(Window::Calibration);

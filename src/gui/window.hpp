@@ -45,13 +45,14 @@ class Window : public QMainWindow {
     QStackedWidget *pages = nullptr, *welcomeOrProject = nullptr;
     QListWidget navigation, recentProjects, resultList;
     QLabel projectName, pageTitle, pageDescription, pageHint, importSummary, calibrationHint,
-        preflightSummary, selectionSummary, frameDetails, resultDetails, jobTitle, jobDetail;
+        preflightSummary, selectionSummary, importSelectionSummary, frameDetails, resultDetails, jobTitle,
+        jobDetail;
     ImageView resultView;
-    QTableWidget assignments, stackGroups;
+    QTableWidget assignments, stackGroups, importNights;
     QLineEdit preparedDirectory, stackDirectory, exportDirectory, search;
     QComboBox typeFilter, nightFilter, stateFilter, stackFormat, exportFormat;
     QPushButton primary, cancelJob, recoverJob, viewCompletion, applyAssignment, masterButton,
-        importMasterButton;
+        importMasterButton, allImportNights, selectShown;
     QToolButton detailsToggle, logsToggle;
     QWidget *projectWorkspace = nullptr, *jobPanel = nullptr, *inspector = nullptr;
     ImportDropArea *dropArea = nullptr;
@@ -86,6 +87,9 @@ class Window : public QMainWindow {
     void chooseImport(bool folder);
     void updateRecentProjects(const QString &path = {});
     void updateFilters();
+    void refreshImportNights();
+    void setImportNight(const std::optional<QString> &night = {});
+    void updateImportSelection();
     void refreshPages();
     void refreshCalibration();
     void updateCalibrationGroup();

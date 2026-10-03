@@ -191,6 +191,7 @@ class FrameModel : public QAbstractTableModel {
 class FrameProxy : public QSortFilterProxyModel {
   public:
     QString kind, band, night, state, search;
+    bool exactNight = false; // Also match an empty night; otherwise empty means all nights.
     bool filterAcceptsRow(int row, const QModelIndex &) const override {
         auto *frames = static_cast<FrameModel *>(sourceModel());
         const auto &f = frames->frames[size_t(row)];
@@ -198,7 +199,7 @@ class FrameProxy : public QSortFilterProxyModel {
             return false;
         if (!band.isEmpty() && q(f.filter) != band)
             return false;
-        if (!night.isEmpty() && q(f.session) != night)
+        if ((exactNight || !night.isEmpty()) && q(f.session) != night)
             return false;
         if (!search.isEmpty() && !q(f.path.filename().string()).contains(search, Qt::CaseInsensitive))
             return false;
